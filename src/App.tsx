@@ -86,10 +86,10 @@ type StudentProfile = {
 
 type UserRole = 'guest' | 'student' | 'admin';
 
-const PROGRESS_STORAGE_KEY = 'pisa_q_dev_progress_v5';
-const BUILDER_STORAGE_KEY = 'pisa_q_dev_builder_v2';
-const USER_ROLE_STORAGE_KEY = 'pisa_q_dev_user_role_v1';
-const STUDENT_PROFILE_STORAGE_KEY = 'pisa_q_dev_student_profile_v1';
+const PROGRESS_STORAGE_KEY = 'pisa_q_dev_progress_v6';
+const BUILDER_STORAGE_KEY = 'pisa_q_dev_builder_v3';
+const USER_ROLE_STORAGE_KEY = 'pisa_q_dev_user_role_v2';
+const STUDENT_PROFILE_STORAGE_KEY = 'pisa_q_dev_student_profile_v2';
 const DEFAULT_TIME_SECONDS = 30 * 60;
 const MAX_UNITS = 5;
 const MAX_QUESTIONS = 5;
@@ -288,7 +288,12 @@ function createBlankUnit(n: number): Unit {
     title: `Unit ${n}`,
     competency: '',
     questions: Array.from({ length: MAX_QUESTIONS }, (_, i) => createQuestion(i)),
-    stimulusBlocks: [createArticleBlock(), createTableBlock(), createChartBlock(), createVisualBlock()],
+    stimulusBlocks: [
+      createArticleBlock(),
+      createTableBlock(),
+      createChartBlock(),
+      createVisualBlock(),
+    ],
   };
 }
 
@@ -301,16 +306,6 @@ function loadSavedProgress(): SavedProgress | null {
     const raw = localStorage.getItem(PROGRESS_STORAGE_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as SavedProgress;
-  } catch {
-    return null;
-  }
-}
-
-function loadSavedBuilder(): Unit[] | null {
-  try {
-    const raw = localStorage.getItem(BUILDER_STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as Unit[];
   } catch {
     return null;
   }
@@ -329,17 +324,11 @@ function loadSavedRole(): UserRole {
 function loadSavedStudentProfile(): StudentProfile {
   try {
     const raw = localStorage.getItem(STUDENT_PROFILE_STORAGE_KEY);
-    if (!raw) {
-      return { name: '', school: '', gradeLevel: '', section: '' };
-    }
+    if (!raw) return { name: '', school: '', gradeLevel: '', section: '' };
     return JSON.parse(raw) as StudentProfile;
   } catch {
     return { name: '', school: '', gradeLevel: '', section: '' };
   }
-}
-
-function saveBuilderToStorage(units: Unit[]) {
-  localStorage.setItem(BUILDER_STORAGE_KEY, JSON.stringify(units));
 }
 
 function formatTime(totalSeconds: number) {
@@ -347,13 +336,6 @@ function formatTime(totalSeconds: number) {
   const minutes = Math.floor(safe / 60);
   const seconds = safe % 60;
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
-
-function isTextCorrect(response: string, sample: string) {
-  const cleanResponse = response.trim().toLowerCase();
-  const cleanSample = sample.trim().toLowerCase();
-  if (!cleanResponse || !cleanSample) return false;
-  return cleanResponse.includes(cleanSample) || cleanSample.includes(cleanResponse);
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -372,10 +354,14 @@ function renumberQuestions(questions: Question[]) {
   }));
 }
 
-export default function App() {
-  const savedProgress = typeof window !== 'undefined' ? loadSavedProgress() : null;
-  const savedBuilder = typeof window !== 'undefined' ? loadSavedBuilder() : null;
+function isTextCorrect(response: string, sample: string) {
+  const cleanResponse = response.trim().toLowerCase();
+  const cleanSample = sample.trim().toLowerCase();
+  if (!cleanResponse || !cleanSample) return false;
+  return cleanResponse.includes(cleanSample) || cleanSample.includes(cleanResponse);
+}
 
+export default function App() {
   const importRef = useRef<HTMLInputElement | null>(null);
 
   const [userRole, setUserRole] = useState<UserRole>(loadSavedRole());
@@ -384,9 +370,13 @@ export default function App() {
   const [adminPin, setAdminPin] = useState('');
   const [adminPinError, setAdminPinError] = useState('');
 
-  const [view, setView] = useState<'admin' | 'assessment' | 'analytics' | 'print'>('admin');
+  const [view, setView] = useState<'admin' | 'assessment' | 'analytics' | 'print'>('assessment');
   const [assessmentMode, setAssessmentMode] = useState<'question' | 'review'>('question');
-  const [units, setUnits] = useState<Unit[]>(savedBuilder ?? createInitialUnits());
+  const [units, setUnits] = useState<Unit[]>([]);
+  const [isLoadingUnits, setIsLoadingUnits] = useState(true);
+
+  const savedProgress = loadSavedProgress();
+
   const [selectedUnitIndex, setSelectedUnitIndex] = useState(savedProgress?.selectedUnitIndex ?? 0);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(savedProgress?.currentQuestionIndex ?? 0);
   const [activeStimulusIndex, setActiveStimulusIndex] = useState(savedProgress?.activeStimulusIndex ?? 0);
@@ -397,12 +387,59 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<'Saved' | 'Saving...'>('Saved');
   const [previewUnitIndex, setPreviewUnitIndex] = useState<number | null>(null);
 
-  const selectedUnit = units[selectedUnitIndex];
-  const currentQuestion =
-    selectedUnit?.questions[currentQuestionIndex] ?? selectedUnit?.questions[0];
-  const activeStimulus =
-    selectedUnit?.stimulusBlocks[activeStimulusIndex] ?? selectedUnit?.stimulusBlocks[0];
-  const previewUnit = previewUnitIndex !== null ? units[previewUnitIndex] : null;
+  useEffect(() => {
+    async function loadUnits() {
+      try {
+        // Students always see the published deployed test
+        if (userRole === 'student') {
+          try {
+            const res = await fetch('/test-data.json', { cache: 'no-store' });
+            if (res.ok) {
+              const json = await res.json();
+              if (Array.isArray(json) && json.length > 0) {
+                setUnits(json);
+                return;
+              }
+            }
+          } catch {
+            // ignore and fallback below
+          }
+
+          setUnits(createInitialUnits());
+          return;
+        }
+
+        // Admin/guest prefer local builder draft
+        const localBuilder = localStorage.getItem(BUILDER_STORAGE_KEY);
+        if (localBuilder) {
+          setUnits(JSON.parse(localBuilder));
+          return;
+        }
+
+        // Then published JSON
+        try {
+          const res = await fetch('/test-data.json', { cache: 'no-store' });
+          if (res.ok) {
+            const json = await res.json();
+            if (Array.isArray(json) && json.length > 0) {
+              setUnits(json);
+              return;
+            }
+          }
+        } catch {
+          // ignore and fallback
+        }
+
+        setUnits(createInitialUnits());
+      } catch {
+        setUnits(createInitialUnits());
+      } finally {
+        setIsLoadingUnits(false);
+      }
+    }
+
+    loadUnits();
+  }, [userRole]);
 
   useEffect(() => {
     localStorage.setItem(USER_ROLE_STORAGE_KEY, userRole);
@@ -444,15 +481,18 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!units.length) return;
+    if (userRole !== 'admin') return;
+
     setSaveStatus('Saving...');
     const timer = window.setTimeout(() => {
-      saveBuilderToStorage(units);
+      localStorage.setItem(BUILDER_STORAGE_KEY, JSON.stringify(units));
       setSaveStatus('Saved');
       setBuilderSavedAt(new Date().toLocaleString());
     }, 450);
 
     return () => window.clearTimeout(timer);
-  }, [units]);
+  }, [units, userRole]);
 
   useEffect(() => {
     if (userRole === 'student') {
@@ -462,9 +502,15 @@ export default function App() {
     }
   }, [userRole]);
 
-  function saveBuilder() {
-    setSaveStatus('Saving...');
-    saveBuilderToStorage(units);
+  const selectedUnit = units[selectedUnitIndex];
+  const currentQuestion =
+    selectedUnit?.questions[currentQuestionIndex] ?? selectedUnit?.questions[0];
+  const activeStimulus =
+    selectedUnit?.stimulusBlocks[activeStimulusIndex] ?? selectedUnit?.stimulusBlocks[0];
+  const previewUnit = previewUnitIndex !== null ? units[previewUnitIndex] : null;
+
+  function saveBuilderNow() {
+    localStorage.setItem(BUILDER_STORAGE_KEY, JSON.stringify(units));
     setSaveStatus('Saved');
     setBuilderSavedAt(new Date().toLocaleString());
   }
@@ -499,9 +545,7 @@ export default function App() {
 
   function handleStudentStart() {
     const { name, school, gradeLevel, section } = studentForm;
-    if (!name.trim() || !school.trim() || !gradeLevel.trim() || !section.trim()) {
-      return;
-    }
+    if (!name.trim() || !school.trim() || !gradeLevel.trim() || !section.trim()) return;
     setStudentProfile(studentForm);
     setUserRole('student');
     setView('assessment');
@@ -534,7 +578,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'pisa-test-builder.json';
+    a.download = 'test-data.json';
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -586,9 +630,7 @@ export default function App() {
 
   function toggleFlag(questionId: string) {
     setFlaggedQuestions((prev) =>
-      prev.includes(questionId)
-        ? prev.filter((id) => id !== questionId)
-        : [...prev, questionId]
+      prev.includes(questionId) ? prev.filter((id) => id !== questionId) : [...prev, questionId]
     );
   }
 
@@ -649,14 +691,12 @@ export default function App() {
     setUnits((prev) =>
       prev.map((unit, i) => {
         if (i !== unitIndex) return unit;
-
         const questions = unit.questions.map((q, qi) => {
           if (qi !== questionIndex) return q;
           const options = [...q.options];
           options[optionIndex] = value;
           return { ...q, options };
         });
-
         return { ...unit, questions };
       })
     );
@@ -664,7 +704,7 @@ export default function App() {
 
   function deleteQuestion(unitIndex: number, questionIndex: number) {
     const unit = units[unitIndex];
-    const questionToDelete = unit.questions[questionIndex];
+    const questionToDelete = unit?.questions[questionIndex];
     if (!questionToDelete) return;
     if (unit.questions.length <= 1) return;
 
@@ -698,13 +738,11 @@ export default function App() {
     setUnits((prev) =>
       prev.map((unit, i) => {
         if (i !== unitIndex) return unit;
-
         let newBlock: StimulusBlock;
         if (type === 'article') newBlock = createArticleBlock();
         else if (type === 'table') newBlock = createTableBlock();
         else if (type === 'chart') newBlock = createChartBlock();
         else newBlock = createVisualBlock();
-
         return { ...unit, stimulusBlocks: [...unit.stimulusBlocks, newBlock] };
       })
     );
@@ -715,7 +753,6 @@ export default function App() {
       prev.map((unit, i) => {
         if (i !== unitIndex) return unit;
         if (unit.stimulusBlocks.length <= 1) return unit;
-
         return {
           ...unit,
           stimulusBlocks: unit.stimulusBlocks.filter((_, bi) => bi !== blockIndex),
@@ -1014,7 +1051,6 @@ export default function App() {
 
       if (hasAnswer) {
         totalAnswered += 1;
-
         if (q.type === 'mcq') {
           if (response === q.correctAnswer) totalCorrect += 1;
         } else if (typeof response === 'string' && isTextCorrect(response, q.sampleAnswer)) {
@@ -1037,16 +1073,18 @@ export default function App() {
     };
   }, [units, allQuestions, responses, flaggedQuestions]);
 
-  const answeredInUnit = selectedUnit.questions.filter((q) => {
-    const response = responses[q.id];
-    return q.type === 'mcq'
-      ? typeof response === 'number'
-      : typeof response === 'string' && response.trim() !== '';
-  }).length;
+  const answeredInUnit = selectedUnit
+    ? selectedUnit.questions.filter((q) => {
+        const response = responses[q.id];
+        return q.type === 'mcq'
+          ? typeof response === 'number'
+          : typeof response === 'string' && response.trim() !== '';
+      }).length
+    : 0;
 
-  const flaggedInUnit = selectedUnit.questions.filter((q) =>
-    flaggedQuestions.includes(q.id)
-  ).length;
+  const flaggedInUnit = selectedUnit
+    ? selectedUnit.questions.filter((q) => flaggedQuestions.includes(q.id)).length
+    : 0;
 
   const unitProgress = useMemo(() => {
     return units.map((unit) => {
@@ -1071,23 +1109,38 @@ export default function App() {
     });
   }, [units, responses]);
 
-  const reviewItems = selectedUnit.questions.map((q) => {
-    const response = responses[q.id];
-    const answered =
-      q.type === 'mcq'
-        ? typeof response === 'number'
-        : typeof response === 'string' && response.trim() !== '';
+  const reviewItems = selectedUnit
+    ? selectedUnit.questions.map((q) => {
+        const response = responses[q.id];
+        const answered =
+          q.type === 'mcq'
+            ? typeof response === 'number'
+            : typeof response === 'string' && response.trim() !== '';
 
-    return {
-      ...q,
-      answered,
-      flagged: flaggedQuestions.includes(q.id),
-    };
-  });
+        return {
+          ...q,
+          answered,
+          flagged: flaggedQuestions.includes(q.id),
+        };
+      })
+    : [];
 
   function submitAssessment() {
     setAssessmentMode('question');
     setView('analytics');
+  }
+
+  if (isLoadingUnits) {
+    return (
+      <div className="app-shell">
+        <div className="entry-page-shell">
+          <div className="entry-card role-card">
+            <h1>SDO - San Juan City PISA Type Assessment</h1>
+            <p className="page-subtitle">Loading assessment...</p>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (userRole === 'guest') {
@@ -1106,17 +1159,13 @@ export default function App() {
                 <div className="field-label">Name</div>
                 <input
                   value={studentForm.name}
-                  onChange={(e) =>
-                    setStudentForm((prev) => ({ ...prev, name: e.target.value }))
-                  }
+                  onChange={(e) => setStudentForm((prev) => ({ ...prev, name: e.target.value }))}
                 />
 
                 <div className="field-label">School</div>
                 <input
                   value={studentForm.school}
-                  onChange={(e) =>
-                    setStudentForm((prev) => ({ ...prev, school: e.target.value }))
-                  }
+                  onChange={(e) => setStudentForm((prev) => ({ ...prev, school: e.target.value }))}
                 />
 
                 <div className="field-label">Grade Level</div>
@@ -1130,9 +1179,7 @@ export default function App() {
                 <div className="field-label">Section</div>
                 <input
                   value={studentForm.section}
-                  onChange={(e) =>
-                    setStudentForm((prev) => ({ ...prev, section: e.target.value }))
-                  }
+                  onChange={(e) => setStudentForm((prev) => ({ ...prev, section: e.target.value }))}
                 />
 
                 <button className="primary-btn full-btn" onClick={handleStudentStart}>
@@ -1186,7 +1233,8 @@ export default function App() {
           <p className="page-subtitle">Pinaglabanan St, San Juan City</p>
           {isStudent && (
             <p className="student-profile-line">
-              Student: <strong>{studentProfile.name}</strong> • {studentProfile.school} • {studentProfile.gradeLevel} • {studentProfile.section}
+              Student: <strong>{studentProfile.name}</strong> • {studentProfile.school} •{' '}
+              {studentProfile.gradeLevel} • {studentProfile.section}
             </p>
           )}
           {isAdmin && (
@@ -1211,7 +1259,7 @@ export default function App() {
               <button onClick={() => setView('print')} className="ghost-btn">
                 Print View
               </button>
-              <button onClick={saveBuilder} className="primary-btn">
+              <button onClick={saveBuilderNow} className="primary-btn">
                 Save Builder
               </button>
               <button onClick={exportJSON} className="secondary-btn">
@@ -1255,7 +1303,7 @@ export default function App() {
         </div>
       </div>
 
-      {isAdmin && view === 'admin' && (
+      {isAdmin && view === 'admin' && selectedUnit && (
         <div className="admin-layout">
           <div className="unit-switcher-card">
             <div className="field-label">Select Unit</div>
@@ -1405,7 +1453,10 @@ export default function App() {
                       <button className="mini-btn" onClick={() => addTableRow(selectedUnitIndex, blockIndex)}>
                         Add Row
                       </button>
-                      <button className="mini-btn" onClick={() => addTableColumn(selectedUnitIndex, blockIndex)}>
+                      <button
+                        className="mini-btn"
+                        onClick={() => addTableColumn(selectedUnitIndex, blockIndex)}
+                      >
                         Add Column
                       </button>
                     </div>
@@ -1436,14 +1487,22 @@ export default function App() {
                       <div
                         key={rowIndex}
                         className="dynamic-grid table-row-grid"
-                        style={{ gridTemplateColumns: `repeat(${block.headers.length}, minmax(0, 1fr)) auto` }}
+                        style={{
+                          gridTemplateColumns: `repeat(${block.headers.length}, minmax(0, 1fr)) auto`,
+                        }}
                       >
                         {row.map((cell, colIndex) => (
                           <input
                             key={colIndex}
                             value={cell}
                             onChange={(e) =>
-                              updateTableCell(selectedUnitIndex, blockIndex, rowIndex, colIndex, e.target.value)
+                              updateTableCell(
+                                selectedUnitIndex,
+                                blockIndex,
+                                rowIndex,
+                                colIndex,
+                                e.target.value
+                              )
                             }
                           />
                         ))}
@@ -1589,12 +1648,7 @@ export default function App() {
                 <select
                   value={q.type}
                   onChange={(e) =>
-                    updateQuestionField(
-                      selectedUnitIndex,
-                      qIndex,
-                      'type',
-                      e.target.value as QuestionType
-                    )
+                    updateQuestionField(selectedUnitIndex, qIndex, 'type', e.target.value as QuestionType)
                   }
                 >
                   <option value="mcq">Multiple Choice</option>
@@ -1673,307 +1727,307 @@ export default function App() {
         </div>
       )}
 
-      {(view === 'assessment' || view === 'analytics' || view === 'print') &&
+      {view === 'assessment' &&
+        assessmentMode === 'question' &&
         selectedUnit &&
         currentQuestion &&
-        activeStimulus &&
-        assessmentMode === 'question' &&
-        view === 'assessment' && (
-        <>
-          <div className="assessment-topbar">
-            <div className="assessment-brand">
-              <div className="brand-mark">P</div>
-              <div>
-                <h2>{selectedUnit.title}</h2>
+        activeStimulus && (
+          <>
+            <div className="assessment-topbar">
+              <div className="assessment-brand">
+                <div className="brand-mark">P</div>
+                <div>
+                  <h2>{selectedUnit.title}</h2>
+                </div>
+              </div>
+
+              <div className="assessment-metrics">
+                <div className="metric-card timer-card">
+                  <span>Timer</span>
+                  <strong>{formatTime(timeRemaining)}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Answered</span>
+                  <strong>{answeredInUnit}</strong>
+                </div>
+                <div className="metric-card">
+                  <span>Flagged</span>
+                  <strong>{flaggedInUnit}</strong>
+                </div>
+                <div className="metric-card accent">
+                  <span>Current</span>
+                  <strong>
+                    {currentQuestionIndex + 1}/{selectedUnit.questions.length}
+                  </strong>
+                </div>
               </div>
             </div>
 
-            <div className="assessment-metrics">
-              <div className="metric-card timer-card">
-                <span>Timer</span>
-                <strong>{formatTime(timeRemaining)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Answered</span>
-                <strong>{answeredInUnit}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Flagged</span>
-                <strong>{flaggedInUnit}</strong>
-              </div>
-              <div className="metric-card accent">
-                <span>Current</span>
-                <strong>
-                  {currentQuestionIndex + 1}/{selectedUnit.questions.length}
-                </strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="unit-progress-strip">
-            {unitProgress.map((item, idx) => (
-              <div key={item.id} className={`unit-progress-card ${idx === selectedUnitIndex ? 'active' : ''}`}>
-                <div className="unit-progress-top">
-                  <span>{item.title}</span>
-                  <span>{item.answered}/{item.total}</span>
-                </div>
-                <div className="unit-progress-bar">
-                  <div className="unit-progress-fill" style={{ width: `${item.percent}%` }} />
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="assessment-main">
-            <div className="question-pane">
-              <div className="unit-nav">
-                {units.map((unit, idx) => (
-                  <button
-                    key={unit.id}
-                    onClick={() => selectUnit(idx)}
-                    className={selectedUnitIndex === idx ? 'active' : ''}
-                  >
-                    {unit.title}
-                  </button>
-                ))}
-              </div>
-
-              <div className="question-progress-card">
-                <div className="question-progress-head">
-                  <span>Question Navigator</span>
-                  <span>
-                    {currentQuestionIndex + 1} / {selectedUnit.questions.length}
-                  </span>
-                </div>
-
-                <div className="question-number-grid">
-                  {selectedUnit.questions.map((q, idx) => {
-                    const response = responses[q.id];
-                    const isAnswered =
-                      q.type === 'mcq'
-                        ? typeof response === 'number'
-                        : typeof response === 'string' && response.trim() !== '';
-                    const isActive = idx === currentQuestionIndex;
-                    const isFlagged = flaggedQuestions.includes(q.id);
-
-                    return (
-                      <button
-                        key={q.id}
-                        className={`question-number-btn ${isAnswered ? 'answered' : ''} ${isActive ? 'active' : ''} ${isFlagged ? 'flagged' : ''}`}
-                        onClick={() => setCurrentQuestionIndex(idx)}
-                      >
-                        {q.number}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="question-workspace">
-                <div className="question-meta-line">
-                  <span className="question-tag">Question {currentQuestion.number}</span>
-                  <span className="question-domain">
-                    {currentQuestion.type === 'mcq' ? 'Multiple Choice' : 'Text Response'}
-                  </span>
-                </div>
-
-                <div className="flag-row">
-                  <button
-                    className={`flag-btn ${flaggedQuestions.includes(currentQuestion.id) ? 'active' : ''}`}
-                    onClick={() => toggleFlag(currentQuestion.id)}
-                  >
-                    {flaggedQuestions.includes(currentQuestion.id)
-                      ? 'Unflag for Review'
-                      : 'Flag for Review'}
-                  </button>
-                </div>
-
-                <div className="assessment-question-card">
-                  <h3>{currentQuestion.prompt}</h3>
-
-                  {currentQuestion.image && (
-                    <img src={currentQuestion.image} alt="" className="preview-img assessment-img" />
-                  )}
-
-                  {currentQuestion.type === 'mcq' && (
-                    <div className="assessment-options">
-                      {currentQuestion.options.map((opt, i) => (
-                        <label key={`${currentQuestion.id}-${i}`} className="assessment-option">
-                          <input
-                            type="radio"
-                            name={currentQuestion.id}
-                            checked={responses[currentQuestion.id] === i}
-                            onChange={() => answer(currentQuestion.id, i)}
-                          />
-                          <span className="option-letter">{String.fromCharCode(65 + i)}</span>
-                          <span>{opt}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )}
-
-                  {currentQuestion.type === 'text' && (
-                    <div className="text-response-box">
-                      <label className="field-label">Your Answer</label>
-                      <textarea
-                        className="text-response-area"
-                        value={
-                          typeof responses[currentQuestion.id] === 'string'
-                            ? (responses[currentQuestion.id] as string)
-                            : ''
-                        }
-                        onChange={(e) => answer(currentQuestion.id, e.target.value)}
-                        placeholder="Type your response here..."
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div className="assessment-nav-row">
-                  <button
-                    className="soft-btn"
-                    disabled={currentQuestionIndex === 0}
-                    onClick={() => setCurrentQuestionIndex((prev) => prev - 1)}
-                  >
-                    Previous
-                  </button>
-
-                  <div className="assessment-nav-center">
-                    <button
-                      className="secondary-btn"
-                      onClick={() => setAssessmentMode('review')}
-                    >
-                      Review Screen
-                    </button>
+            <div className="unit-progress-strip">
+              {unitProgress.map((item, idx) => (
+                <div key={item.id} className={`unit-progress-card ${idx === selectedUnitIndex ? 'active' : ''}`}>
+                  <div className="unit-progress-top">
+                    <span>{item.title}</span>
+                    <span>
+                      {item.answered}/{item.total}
+                    </span>
                   </div>
-
-                  <button
-                    className="primary-btn"
-                    disabled={currentQuestionIndex === selectedUnit.questions.length - 1}
-                    onClick={() => setCurrentQuestionIndex((prev) => prev + 1)}
-                  >
-                    Next
-                  </button>
+                  <div className="unit-progress-bar">
+                    <div className="unit-progress-fill" style={{ width: `${item.percent}%` }} />
+                  </div>
                 </div>
-              </div>
+              ))}
             </div>
 
-            <div className="stimulus-pane">
-              <div className="stimulus-window">
-                <div className="stimulus-window-top">
-                  <div className="window-dots">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <div className="window-title">{selectedUnit.title}</div>
-                </div>
-
-                <div className="stimulus-hero">
-                  <h3>Learning Competencies</h3>
-                  <p>{selectedUnit.competency}</p>
-                </div>
-
-                <div className="stimulus-tabs">
-                  {selectedUnit.stimulusBlocks.map((block, idx) => (
+            <div className="assessment-main">
+              <div className="question-pane">
+                <div className="unit-nav">
+                  {units.map((unit, idx) => (
                     <button
-                      key={block.id}
-                      className={`stimulus-tab ${activeStimulusIndex === idx ? 'active' : ''}`}
-                      onClick={() => setActiveStimulusIndex(idx)}
+                      key={unit.id}
+                      onClick={() => selectUnit(idx)}
+                      className={selectedUnitIndex === idx ? 'active' : ''}
                     >
-                      {block.label}
+                      {unit.title}
                     </button>
                   ))}
                 </div>
 
-                <div className="stimulus-body-stacked">
-                  {activeStimulus.type === 'article' && (
-                    <div className="stimulus-content-card">
-                      <h4>{activeStimulus.title || 'Article'}</h4>
-                      {activeStimulus.image && (
-                        <img src={activeStimulus.image} alt="" className="preview-img stimulus-img" />
-                      )}
-                      <p>{activeStimulus.content || 'No content added yet.'}</p>
-                    </div>
-                  )}
+                <div className="question-progress-card">
+                  <div className="question-progress-head">
+                    <span>Question Navigator</span>
+                    <span>
+                      {currentQuestionIndex + 1} / {selectedUnit.questions.length}
+                    </span>
+                  </div>
 
-                  {activeStimulus.type === 'table' && (
-                    <div className="stimulus-content-card">
-                      <h4>{activeStimulus.title || 'Table'}</h4>
-                      <table className="builder-table">
-                        <thead>
-                          <tr>
-                            {activeStimulus.headers.map((header, i) => (
-                              <th key={i}>{header}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {activeStimulus.rows.map((row, i) => (
-                            <tr key={i}>
-                              {row.map((cell, ci) => (
-                                <td key={ci}>{cell}</td>
+                  <div className="question-number-grid">
+                    {selectedUnit.questions.map((q, idx) => {
+                      const response = responses[q.id];
+                      const isAnswered =
+                        q.type === 'mcq'
+                          ? typeof response === 'number'
+                          : typeof response === 'string' && response.trim() !== '';
+                      const isActive = idx === currentQuestionIndex;
+                      const isFlagged = flaggedQuestions.includes(q.id);
+
+                      return (
+                        <button
+                          key={q.id}
+                          className={`question-number-btn ${isAnswered ? 'answered' : ''} ${
+                            isActive ? 'active' : ''
+                          } ${isFlagged ? 'flagged' : ''}`}
+                          onClick={() => setCurrentQuestionIndex(idx)}
+                        >
+                          {q.number}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="question-workspace">
+                  <div className="question-meta-line">
+                    <span className="question-tag">Question {currentQuestion.number}</span>
+                    <span className="question-domain">
+                      {currentQuestion.type === 'mcq' ? 'Multiple Choice' : 'Text Response'}
+                    </span>
+                  </div>
+
+                  <div className="flag-row">
+                    <button
+                      className={`flag-btn ${flaggedQuestions.includes(currentQuestion.id) ? 'active' : ''}`}
+                      onClick={() => toggleFlag(currentQuestion.id)}
+                    >
+                      {flaggedQuestions.includes(currentQuestion.id)
+                        ? 'Unflag for Review'
+                        : 'Flag for Review'}
+                    </button>
+                  </div>
+
+                  <div className="assessment-question-card">
+                    <h3>{currentQuestion.prompt}</h3>
+
+                    {currentQuestion.image && (
+                      <img src={currentQuestion.image} alt="" className="preview-img assessment-img" />
+                    )}
+
+                    {currentQuestion.type === 'mcq' && (
+                      <div className="assessment-options">
+                        {currentQuestion.options.map((opt, i) => (
+                          <label key={`${currentQuestion.id}-${i}`} className="assessment-option">
+                            <input
+                              type="radio"
+                              name={currentQuestion.id}
+                              checked={responses[currentQuestion.id] === i}
+                              onChange={() => answer(currentQuestion.id, i)}
+                            />
+                            <span className="option-letter">{String.fromCharCode(65 + i)}</span>
+                            <span>{opt}</span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    {currentQuestion.type === 'text' && (
+                      <div className="text-response-box">
+                        <label className="field-label">Your Answer</label>
+                        <textarea
+                          className="text-response-area"
+                          value={
+                            typeof responses[currentQuestion.id] === 'string'
+                              ? (responses[currentQuestion.id] as string)
+                              : ''
+                          }
+                          onChange={(e) => answer(currentQuestion.id, e.target.value)}
+                          placeholder="Type your response here..."
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="assessment-nav-row">
+                    <button
+                      className="soft-btn"
+                      disabled={currentQuestionIndex === 0}
+                      onClick={() => setCurrentQuestionIndex((prev) => prev - 1)}
+                    >
+                      Previous
+                    </button>
+
+                    <div className="assessment-nav-center">
+                      <button className="secondary-btn" onClick={() => setAssessmentMode('review')}>
+                        Review Screen
+                      </button>
+                    </div>
+
+                    <button
+                      className="primary-btn"
+                      disabled={currentQuestionIndex === selectedUnit.questions.length - 1}
+                      onClick={() => setCurrentQuestionIndex((prev) => prev + 1)}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="stimulus-pane">
+                <div className="stimulus-window">
+                  <div className="stimulus-window-top">
+                    <div className="window-dots">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <div className="window-title">{selectedUnit.title}</div>
+                  </div>
+
+                  <div className="stimulus-hero">
+                    <h3>Learning Competencies</h3>
+                    <p>{selectedUnit.competency}</p>
+                  </div>
+
+                  <div className="stimulus-tabs">
+                    {selectedUnit.stimulusBlocks.map((block, idx) => (
+                      <button
+                        key={block.id}
+                        className={`stimulus-tab ${activeStimulusIndex === idx ? 'active' : ''}`}
+                        onClick={() => setActiveStimulusIndex(idx)}
+                      >
+                        {block.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="stimulus-body-stacked">
+                    {activeStimulus.type === 'article' && (
+                      <div className="stimulus-content-card">
+                        <h4>{activeStimulus.title || 'Article'}</h4>
+                        {activeStimulus.image && (
+                          <img src={activeStimulus.image} alt="" className="preview-img stimulus-img" />
+                        )}
+                        <p>{activeStimulus.content || 'No content added yet.'}</p>
+                      </div>
+                    )}
+
+                    {activeStimulus.type === 'table' && (
+                      <div className="stimulus-content-card">
+                        <h4>{activeStimulus.title || 'Table'}</h4>
+                        <table className="builder-table">
+                          <thead>
+                            <tr>
+                              {activeStimulus.headers.map((header, i) => (
+                                <th key={i}>{header}</th>
                               ))}
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      {activeStimulus.note && <p className="tab-note">{activeStimulus.note}</p>}
-                    </div>
-                  )}
-
-                  {activeStimulus.type === 'chart' && (
-                    <div className="stimulus-content-card">
-                      <h4>{activeStimulus.title || 'Chart'}</h4>
-                      <div className="chart-card">
-                        <div className="chart-bars">
-                          {activeStimulus.bars.map((bar) => {
-                            const max = Math.max(...activeStimulus.bars.map((b) => b.value), 1);
-                            return (
-                              <div key={bar.id} className="chart-bar-group">
-                                <div className="chart-value">{bar.value}</div>
-                                <div className="chart-bar-shell">
-                                  <div
-                                    className="chart-bar"
-                                    style={{ height: `${(bar.value / max) * 100}%` }}
-                                  />
-                                </div>
-                                <div className="chart-label">{bar.label}</div>
-                              </div>
-                            );
-                          })}
-                        </div>
+                          </thead>
+                          <tbody>
+                            {activeStimulus.rows.map((row, i) => (
+                              <tr key={i}>
+                                {row.map((cell, ci) => (
+                                  <td key={ci}>{cell}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {activeStimulus.note && <p className="tab-note">{activeStimulus.note}</p>}
                       </div>
-                      {activeStimulus.note && <p className="tab-note">{activeStimulus.note}</p>}
-                    </div>
-                  )}
+                    )}
 
-                  {activeStimulus.type === 'visual' && (
-                    <div className="stimulus-content-card">
-                      <h4>{activeStimulus.title || 'Visual'}</h4>
-                      {activeStimulus.image ? (
-                        <img src={activeStimulus.image} alt="" className="visual-only-image" />
-                      ) : (
-                        <div className="visual-empty-state">
-                          No visual image uploaded yet.
+                    {activeStimulus.type === 'chart' && (
+                      <div className="stimulus-content-card">
+                        <h4>{activeStimulus.title || 'Chart'}</h4>
+                        <div className="chart-card">
+                          <div className="chart-bars">
+                            {activeStimulus.bars.map((bar) => {
+                              const max = Math.max(...activeStimulus.bars.map((b) => b.value), 1);
+                              return (
+                                <div key={bar.id} className="chart-bar-group">
+                                  <div className="chart-value">{bar.value}</div>
+                                  <div className="chart-bar-shell">
+                                    <div
+                                      className="chart-bar"
+                                      style={{ height: `${(bar.value / max) * 100}%` }}
+                                    />
+                                  </div>
+                                  <div className="chart-label">{bar.label}</div>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
-                      )}
-                      {activeStimulus.note && <p className="tab-note">{activeStimulus.note}</p>}
-                    </div>
-                  )}
+                        {activeStimulus.note && <p className="tab-note">{activeStimulus.note}</p>}
+                      </div>
+                    )}
+
+                    {activeStimulus.type === 'visual' && (
+                      <div className="stimulus-content-card">
+                        <h4>{activeStimulus.title || 'Visual'}</h4>
+                        {activeStimulus.image ? (
+                          <img src={activeStimulus.image} alt="" className="visual-only-image" />
+                        ) : (
+                          <div className="visual-empty-state">No visual image uploaded yet.</div>
+                        )}
+                        {activeStimulus.note && <p className="tab-note">{activeStimulus.note}</p>}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )}
 
-      {view === 'assessment' && assessmentMode === 'review' && (
+      {view === 'assessment' && assessmentMode === 'review' && selectedUnit && (
         <div className="entry-card review-card">
           <div className="review-header">
             <div>
               <h2>Review Screen</h2>
-              <p className="page-subtitle">Review answered, unanswered, and flagged items before submission.</p>
+              <p className="page-subtitle">
+                Review answered, unanswered, and flagged items before submission.
+              </p>
             </div>
             <div className="review-actions">
               <button className="secondary-btn" onClick={() => setAssessmentMode('question')}>
@@ -1989,7 +2043,9 @@ export default function App() {
             {reviewItems.map((item, idx) => (
               <button
                 key={item.id}
-                className={`review-item ${item.answered ? 'answered' : 'unanswered'} ${item.flagged ? 'flagged' : ''}`}
+                className={`review-item ${item.answered ? 'answered' : 'unanswered'} ${
+                  item.flagged ? 'flagged' : ''
+                }`}
                 onClick={() => {
                   setCurrentQuestionIndex(idx);
                   setAssessmentMode('question');
@@ -2114,10 +2170,18 @@ export default function App() {
 
             <div className="print-unit">
               <h2>Student Information</h2>
-              <p><strong>Name:</strong> {studentProfile.name || '—'}</p>
-              <p><strong>School:</strong> {studentProfile.school || '—'}</p>
-              <p><strong>Grade Level:</strong> {studentProfile.gradeLevel || '—'}</p>
-              <p><strong>Section:</strong> {studentProfile.section || '—'}</p>
+              <p>
+                <strong>Name:</strong> {studentProfile.name || '—'}
+              </p>
+              <p>
+                <strong>School:</strong> {studentProfile.school || '—'}
+              </p>
+              <p>
+                <strong>Grade Level:</strong> {studentProfile.gradeLevel || '—'}
+              </p>
+              <p>
+                <strong>Section:</strong> {studentProfile.section || '—'}
+              </p>
             </div>
 
             <div className="print-unit">
@@ -2193,13 +2257,17 @@ export default function App() {
             {units.map((unit) => (
               <div key={unit.id} className="print-unit">
                 <h2>{unit.title}</h2>
-                <p><strong>Learning Competencies:</strong> {unit.competency || '—'}</p>
+                <p>
+                  <strong>Learning Competencies:</strong> {unit.competency || '—'}
+                </p>
 
                 <div className="print-section">
                   <h3>Stimulus Blocks</h3>
                   {unit.stimulusBlocks.map((block) => (
                     <div key={block.id} className="print-block">
-                      <h4>{block.label} — {block.title}</h4>
+                      <h4>
+                        {block.label} — {block.title}
+                      </h4>
 
                       {block.type === 'article' && (
                         <>
@@ -2268,9 +2336,13 @@ export default function App() {
                   <h3>Questions</h3>
                   {unit.questions.map((q) => (
                     <div key={q.id} className="print-question">
-                      <p><strong>Q{q.number}.</strong> {q.prompt}</p>
+                      <p>
+                        <strong>Q{q.number}.</strong> {q.prompt}
+                      </p>
                       {q.image && <img src={q.image} alt="" className="print-img" />}
-                      <p><strong>Type:</strong> {q.type === 'mcq' ? 'Multiple Choice' : 'Text Response'}</p>
+                      <p>
+                        <strong>Type:</strong> {q.type === 'mcq' ? 'Multiple Choice' : 'Text Response'}
+                      </p>
 
                       {q.type === 'mcq' && (
                         <ol type="A" className="print-options">
@@ -2281,7 +2353,9 @@ export default function App() {
                       )}
 
                       {q.type === 'text' && (
-                        <p><strong>Expected Answer:</strong> {q.sampleAnswer || '—'}</p>
+                        <p>
+                          <strong>Expected Answer:</strong> {q.sampleAnswer || '—'}
+                        </p>
                       )}
                     </div>
                   ))}
@@ -2313,7 +2387,9 @@ export default function App() {
 
               {previewUnit.stimulusBlocks.map((block) => (
                 <div key={block.id} className="stimulus-content-card">
-                  <h4>{block.label} — {block.title}</h4>
+                  <h4>
+                    {block.label} — {block.title}
+                  </h4>
 
                   {block.type === 'article' && (
                     <>
@@ -2376,9 +2452,7 @@ export default function App() {
                       {block.image ? (
                         <img src={block.image} alt="" className="visual-only-image" />
                       ) : (
-                        <div className="visual-empty-state">
-                          No visual image uploaded yet.
-                        </div>
+                        <div className="visual-empty-state">No visual image uploaded yet.</div>
                       )}
                       {block.note && <p className="tab-note">{block.note}</p>}
                     </>
