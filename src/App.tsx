@@ -361,6 +361,34 @@ function isTextCorrect(response: string, sample: string) {
   return cleanResponse.includes(cleanSample) || cleanSample.includes(cleanResponse);
 }
 
+async function fetchPublishedUnits(): Promise<Unit[] | null> {
+  try {
+    const base = import.meta.env.BASE_URL || '/';
+    const res = await fetch(`${base}test-data.json`, { cache: 'no-store' });
+
+    if (!res.ok) {
+      console.warn('test-data.json request failed with status:', res.status);
+      return null;
+    }
+
+    const json = await res.json();
+
+    if (Array.isArray(json) && json.length > 0) {
+      return json as Unit[];
+    }
+
+    if (json && Array.isArray(json.units) && json.units.length > 0) {
+      return json.units as Unit[];
+    }
+
+    console.warn('test-data.json loaded but format is invalid.');
+    return null;
+  } catch (error) {
+    console.error('Failed to fetch published test-data.json:', error);
+    return null;
+  }
+}
+
 export default function App() {
   const importRef = useRef<HTMLInputElement | null>(null);
 
@@ -374,6 +402,7 @@ export default function App() {
   const [assessmentMode, setAssessmentMode] = useState<'question' | 'review'>('question');
   const [units, setUnits] = useState<Unit[]>([]);
   const [isLoadingUnits, setIsLoadingUnits] = useState(true);
+  const [dataSourceLabel, setDataSourceLabel] = useState<string>('Loading...');
 
   const savedProgress = loadSavedProgress();
 
@@ -389,50 +418,42 @@ export default function App() {
 
   useEffect(() => {
     async function loadUnits() {
+      setIsLoadingUnits(true);
+
       try {
-        // Students always see the published deployed test
         if (userRole === 'student') {
-          try {
-            const res = await fetch('/test-data.json', { cache: 'no-store' });
-            if (res.ok) {
-              const json = await res.json();
-              if (Array.isArray(json) && json.length > 0) {
-                setUnits(json);
-                return;
-              }
-            }
-          } catch {
-            // ignore and fallback below
+          const publishedUnits = await fetchPublishedUnits();
+          if (publishedUnits) {
+            setUnits(publishedUnits);
+            setDataSourceLabel('Published test-data.json');
+            return;
           }
 
           setUnits(createInitialUnits());
+          setDataSourceLabel('Fallback template');
           return;
         }
 
-        // Admin/guest prefer local builder draft
         const localBuilder = localStorage.getItem(BUILDER_STORAGE_KEY);
         if (localBuilder) {
           setUnits(JSON.parse(localBuilder));
+          setDataSourceLabel('Local admin draft');
           return;
         }
 
-        // Then published JSON
-        try {
-          const res = await fetch('/test-data.json', { cache: 'no-store' });
-          if (res.ok) {
-            const json = await res.json();
-            if (Array.isArray(json) && json.length > 0) {
-              setUnits(json);
-              return;
-            }
-          }
-        } catch {
-          // ignore and fallback
+        const publishedUnits = await fetchPublishedUnits();
+        if (publishedUnits) {
+          setUnits(publishedUnits);
+          setDataSourceLabel('Published test-data.json');
+          return;
         }
 
         setUnits(createInitialUnits());
-      } catch {
+        setDataSourceLabel('Fallback template');
+      } catch (error) {
+        console.error('Failed to load units:', error);
         setUnits(createInitialUnits());
+        setDataSourceLabel('Fallback template');
       } finally {
         setIsLoadingUnits(false);
       }
@@ -513,6 +534,7 @@ export default function App() {
     localStorage.setItem(BUILDER_STORAGE_KEY, JSON.stringify(units));
     setSaveStatus('Saved');
     setBuilderSavedAt(new Date().toLocaleString());
+    setDataSourceLabel('Local admin draft');
   }
 
   function resetBuilder() {
@@ -524,6 +546,7 @@ export default function App() {
     setActiveStimulusIndex(0);
     setBuilderSavedAt('');
     setSaveStatus('Saved');
+    setDataSourceLabel('Fallback template');
   }
 
   function resetProgress() {
@@ -607,6 +630,7 @@ export default function App() {
       setActiveStimulusIndex(0);
       setBuilderSavedAt(`Imported on ${new Date().toLocaleString()}`);
       setSaveStatus('Saved');
+      setDataSourceLabel('Local admin draft');
     } catch {
       alert('Unable to import JSON file.');
     } finally {
@@ -1238,9 +1262,12 @@ export default function App() {
             </p>
           )}
           {isAdmin && (
-            <p className="save-status">
-              {`${saveStatus}${builderSavedAt ? ` • ${builderSavedAt}` : ''}`}
-            </p>
+            <>
+              <p className="save-status">
+                {`${saveStatus}${builderSavedAt ? ` • ${builderSavedAt}` : ''}`}
+              </p>
+              <p className="page-subtitle">Source: {dataSourceLabel}</p>
+            </>
           )}
         </div>
 
@@ -1738,6 +1765,7 @@ export default function App() {
                 <div className="brand-mark">P</div>
                 <div>
                   <h2>{selectedUnit.title}</h2>
+                  <p>{isStudent ? `Source: ${dataSourceLabel}` : ''}</p>
                 </div>
               </div>
 
