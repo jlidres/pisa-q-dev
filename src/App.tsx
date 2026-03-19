@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './styles.css';
 
-type QuestionType = 'mcq' | 'text';
-type ResponseValue = string | number;
+type QuestionType = 'mcq' | 'text' | 'true-false' | 'numerical' | 'gap-fill' | 'drag-drop' | 'calc-mcq';
+type ResponseValue = string | number | string[] | Record<string, number>;
 
 type Question = {
   id: string;
@@ -13,6 +13,10 @@ type Question = {
   options: string[];
   correctAnswer: number;
   sampleAnswer: string;
+  numericalAnswer?: number;
+  numericalTolerance?: number;
+  calcVariables?: { name: string; min: number; max: number }[];
+  calcFormula?: string;
 };
 
 type ArticleBlock = {
@@ -109,6 +113,10 @@ function createQuestion(index: number): Question {
     options: ['', '', '', ''],
     correctAnswer: 0,
     sampleAnswer: '',
+    numericalAnswer: 0,
+    numericalTolerance: 0,
+    calcVariables: [{ name: 'x', min: 1, max: 10 }],
+    calcFormula: '',
   };
 }
 
@@ -359,6 +367,53 @@ function isTextCorrect(response: string, sample: string) {
   const cleanSample = sample.trim().toLowerCase();
   if (!cleanResponse || !cleanSample) return false;
   return cleanResponse.includes(cleanSample) || cleanSample.includes(cleanResponse);
+}
+
+function evaluateFormula(formula: string, vars: Record<string, number>): number {
+  try {
+    const keys = Object.keys(vars);
+    const values = Object.values(vars);
+    return new Function(...keys, `return ${formula};`)(...values);
+  } catch {
+    return NaN;
+  }
+}
+
+function hasQuestionAnswered(q: Question, response: ResponseValue): boolean {
+  if (response === undefined || response === null) return false;
+  if (['mcq', 'true-false', 'calc-mcq'].includes(q.type)) {
+    return typeof response === 'number';
+  }
+  if (['gap-fill', 'drag-drop'].includes(q.type)) {
+    return Array.isArray(response) && response.some((r) => r.trim() !== '');
+  }
+  return typeof response === 'string' && response.trim() !== '';
+}
+
+function gradeQuestion(q: Question, response: ResponseValue): boolean {
+  if (!hasQuestionAnswered(q, response)) return false;
+  if (['mcq', 'true-false', 'calc-mcq'].includes(q.type)) {
+    return response === q.correctAnswer;
+  }
+  if (q.type === 'numerical') {
+    const numResp = Number(response);
+    if (isNaN(numResp)) return false;
+    const target = q.numericalAnswer || 0;
+    const tol = q.numericalTolerance || 0;
+    return Math.abs(numResp - target) <= tol;
+  }
+  if (['gap-fill', 'drag-drop'].includes(q.type)) {
+    const arr = Array.isArray(response) ? response : [];
+    const correctAnswers = (q.prompt.match(/\[(.*?)\]/g) || []).map((b) => b.slice(1, -1));
+    return correctAnswers.every((ans, idx) => {
+      const resp = arr[idx] || '';
+      return resp.trim().toLowerCase() === ans.trim().toLowerCase();
+    });
+  }
+  if (typeof response === 'string') {
+    return isTextCorrect(response, q.sampleAnswer);
+  }
+  return false;
 }
 
 async function fetchPublishedUnits(): Promise<Unit[] | null> {
@@ -679,7 +734,7 @@ export default function App() {
     unitIndex: number,
     questionIndex: number,
     field: keyof Question,
-    value: string | number | QuestionType
+    value: any
   ) {
     setUnits((prev) =>
       prev.map((unit, i) => {
@@ -693,7 +748,7 @@ export default function App() {
             return {
               ...q,
               type: nextType,
-              options: nextType === 'mcq' ? q.options : ['', '', '', ''],
+              options: ['mcq', 'drag-drop', 'calc-mcq'].includes(nextType) ? q.options : ['', '', '', ''],
               sampleAnswer: nextType === 'text' ? q.sampleAnswer : '',
             };
           }
@@ -751,6 +806,16 @@ export default function App() {
     if (selectedUnitIndex === unitIndex) {
       setCurrentQuestionIndex((prev) => Math.max(0, Math.min(prev, unit.questions.length - 2)));
     }
+  }
+
+  function addQuestion(unitIndex: number) {
+    setUnits((prev) =>
+      prev.map((u, i) => {
+        if (i !== unitIndex) return u;
+        const newQ = createQuestion(u.questions.length);
+        return { ...u, questions: [...u.questions, newQ] };
+      })
+    );
   }
 
   async function uploadQuestionImage(unitIndex: number, questionIndex: number, file: File) {
@@ -1032,19 +1097,9 @@ export default function App() {
 
       unit.questions.forEach((q) => {
         const response = responses[q.id];
-        const hasAnswer =
-          q.type === 'mcq'
-            ? typeof response === 'number'
-            : typeof response === 'string' && response.trim() !== '';
-
-        if (hasAnswer) {
+        if (hasQuestionAnswered(q, response)) {
           answered += 1;
-
-          if (q.type === 'mcq') {
-            if (response === q.correctAnswer) correct += 1;
-          } else if (typeof response === 'string' && isTextCorrect(response, q.sampleAnswer)) {
-            correct += 1;
-          }
+          if (gradeQuestion(q, response)) correct += 1;
         }
 
         if (flaggedQuestions.includes(q.id)) flagged += 1;
@@ -1068,18 +1123,9 @@ export default function App() {
 
     allQuestions.forEach((q) => {
       const response = responses[q.id];
-      const hasAnswer =
-        q.type === 'mcq'
-          ? typeof response === 'number'
-          : typeof response === 'string' && response.trim() !== '';
-
-      if (hasAnswer) {
+      if (hasQuestionAnswered(q, response)) {
         totalAnswered += 1;
-        if (q.type === 'mcq') {
-          if (response === q.correctAnswer) totalCorrect += 1;
-        } else if (typeof response === 'string' && isTextCorrect(response, q.sampleAnswer)) {
-          totalCorrect += 1;
-        }
+        if (gradeQuestion(q, response)) totalCorrect += 1;
       }
     });
 
@@ -1098,12 +1144,7 @@ export default function App() {
   }, [units, allQuestions, responses, flaggedQuestions]);
 
   const answeredInUnit = selectedUnit
-    ? selectedUnit.questions.filter((q) => {
-        const response = responses[q.id];
-        return q.type === 'mcq'
-          ? typeof response === 'number'
-          : typeof response === 'string' && response.trim() !== '';
-      }).length
+    ? selectedUnit.questions.filter((q) => hasQuestionAnswered(q, responses[q.id])).length
     : 0;
 
   const flaggedInUnit = selectedUnit
@@ -1112,12 +1153,7 @@ export default function App() {
 
   const unitProgress = useMemo(() => {
     return units.map((unit) => {
-      const answered = unit.questions.filter((q) => {
-        const response = responses[q.id];
-        return q.type === 'mcq'
-          ? typeof response === 'number'
-          : typeof response === 'string' && response.trim() !== '';
-      }).length;
+      const answered = unit.questions.filter((q) => hasQuestionAnswered(q, responses[q.id])).length;
 
       const percent = unit.questions.length
         ? Math.round((answered / unit.questions.length) * 100)
@@ -1135,11 +1171,7 @@ export default function App() {
 
   const reviewItems = selectedUnit
     ? selectedUnit.questions.map((q) => {
-        const response = responses[q.id];
-        const answered =
-          q.type === 'mcq'
-            ? typeof response === 'number'
-            : typeof response === 'string' && response.trim() !== '';
+        const answered = hasQuestionAnswered(q, responses[q.id]);
 
         return {
           ...q,
@@ -1680,9 +1712,21 @@ export default function App() {
                 >
                   <option value="mcq">Multiple Choice</option>
                   <option value="text">Text Response</option>
+                  <option value="true-false">True / False</option>
+                  <option value="numerical">Numerical</option>
+                  <option value="gap-fill">Gap Fill</option>
+                  <option value="drag-drop">Drag and Drop</option>
+                  <option value="calc-mcq">Calculated MCQ</option>
                 </select>
 
-                <div className="field-label">Prompt</div>
+                <div className="field-label">
+                  Prompt
+                  {(q.type === 'gap-fill' || q.type === 'drag-drop') && (
+                    <span style={{ fontWeight: 'normal', fontSize: '13px', marginLeft: '8px', color: '#666' }}>
+                      (Wrap words in [brackets] to create blanks. e.g. "The capital is [Paris]")
+                    </span>
+                  )}
+                </div>
                 <textarea
                   value={q.prompt}
                   onChange={(e) =>
@@ -1737,6 +1781,185 @@ export default function App() {
                   </>
                 )}
 
+                {q.type === 'true-false' && (
+                  <>
+                    <div className="field-label">Correct Answer</div>
+                    <select
+                      value={q.correctAnswer}
+                      onChange={(e) =>
+                        updateQuestionField(
+                          selectedUnitIndex,
+                          qIndex,
+                          'correctAnswer',
+                          Number(e.target.value)
+                        )
+                      }
+                    >
+                      <option value={0}>True</option>
+                      <option value={1}>False</option>
+                    </select>
+                  </>
+                )}
+
+                {q.type === 'numerical' && (
+                  <div className="options-grid options-grid-2">
+                    <div>
+                      <div className="field-label">Correct Value</div>
+                      <input
+                        type="number"
+                        value={q.numericalAnswer || 0}
+                        onChange={(e) =>
+                          updateQuestionField(selectedUnitIndex, qIndex, 'numericalAnswer', Number(e.target.value))
+                        }
+                      />
+                    </div>
+                    <div>
+                      <div className="field-label">Tolerance (±)</div>
+                      <input
+                        type="number"
+                        value={q.numericalTolerance || 0}
+                        onChange={(e) =>
+                          updateQuestionField(selectedUnitIndex, qIndex, 'numericalTolerance', Number(e.target.value))
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {q.type === 'drag-drop' && (
+                  <>
+                    <div className="field-label">Distractor Options</div>
+                    <div className="options-grid options-grid-2">
+                      {q.options.map((opt, i) => (
+                        <div key={`${q.id}-distractor-${i}`} className="table-cell-wrap" style={{ display: 'flex', gap: '4px' }}>
+                          <input
+                            value={opt}
+                            onChange={(e) =>
+                              updateQuestionOption(selectedUnitIndex, qIndex, i, e.target.value)
+                            }
+                            placeholder={`Distractor ${i + 1}`}
+                          />
+                          <button
+                            className="mini-btn small-btn danger-mini-btn"
+                            onClick={() => {
+                              const options = q.options.filter((_, idx) => idx !== i);
+                              updateQuestionField(selectedUnitIndex, qIndex, 'options', options);
+                            }}
+                          >
+                            X
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      className="mini-btn"
+                      style={{ marginTop: '8px' }}
+                      onClick={() => {
+                        const options = [...q.options, ''];
+                        updateQuestionField(selectedUnitIndex, qIndex, 'options', options);
+                      }}
+                    >
+                      Add Distractor
+                    </button>
+                  </>
+                )}
+
+                {q.type === 'calc-mcq' && (
+                  <>
+                    <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      Variables
+                      <span style={{ fontWeight: 'normal', fontSize: '13px', color: '#666' }}>
+                        (Use [var_name] in Prompt)
+                      </span>
+                    </div>
+                    {(q.calcVariables || []).map((v, i) => (
+                      <div key={i} className="options-grid options-grid-3" style={{ marginBottom: '8px' }}>
+                        <input
+                          placeholder="Name (e.g. x)"
+                          value={v.name}
+                          onChange={(e) => {
+                            const vars = [...(q.calcVariables || [])];
+                            vars[i] = { ...vars[i], name: e.target.value };
+                            updateQuestionField(selectedUnitIndex, qIndex, 'calcVariables', vars);
+                          }}
+                        />
+                        <input
+                          type="number"
+                          placeholder="Min"
+                          value={v.min}
+                          onChange={(e) => {
+                            const vars = [...(q.calcVariables || [])];
+                            vars[i] = { ...vars[i], min: Number(e.target.value) };
+                            updateQuestionField(selectedUnitIndex, qIndex, 'calcVariables', vars);
+                          }}
+                        />
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          <input
+                            type="number"
+                            placeholder="Max"
+                            value={v.max}
+                            onChange={(e) => {
+                              const vars = [...(q.calcVariables || [])];
+                              vars[i] = { ...vars[i], max: Number(e.target.value) };
+                              updateQuestionField(selectedUnitIndex, qIndex, 'calcVariables', vars);
+                            }}
+                          />
+                          <button
+                            className="mini-btn small-btn danger-mini-btn"
+                            onClick={() => {
+                              const vars = (q.calcVariables || []).filter((_, idx) => idx !== i);
+                              updateQuestionField(selectedUnitIndex, qIndex, 'calcVariables', vars);
+                            }}
+                          >
+                            X
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    <button
+                      className="mini-btn"
+                      onClick={() => {
+                        const vars = [...(q.calcVariables || []), { name: 'y', min: 1, max: 10 }];
+                        updateQuestionField(selectedUnitIndex, qIndex, 'calcVariables', vars);
+                      }}
+                    >
+                      Add Variable
+                    </button>
+
+                    <div className="field-label" style={{ marginTop: '16px' }}>Option Formulas & Correct Answer</div>
+                    <div className="options-grid options-grid-2">
+                      {q.options.map((opt, i) => (
+                        <div key={`${q.id}-calc-opt-${i}`} className="table-cell-wrap" style={{ display: 'flex', gap: '4px' }}>
+                          <input
+                            value={opt}
+                            onChange={(e) =>
+                              updateQuestionOption(selectedUnitIndex, qIndex, i, e.target.value)
+                            }
+                            placeholder={`Formula for Option ${String.fromCharCode(65 + i)}`}
+                          />
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="field-label" style={{ marginTop: '16px' }}>Correct Answer</div>
+                    <select
+                      value={q.correctAnswer}
+                      onChange={(e) =>
+                        updateQuestionField(
+                          selectedUnitIndex,
+                          qIndex,
+                          'correctAnswer',
+                          Number(e.target.value)
+                        )
+                      }
+                    >
+                      {q.options.map((_, i) => (
+                        <option key={i} value={i}>{String.fromCharCode(65 + i)}</option>
+                      ))}
+                    </select>
+                  </>
+                )}
+
                 {q.type === 'text' && (
                   <>
                     <div className="field-label">Expected / Sample Answer</div>
@@ -1750,6 +1973,14 @@ export default function App() {
                 )}
               </div>
             ))}
+            
+            <button
+              className="primary-btn"
+              style={{ marginTop: '20px' }}
+              onClick={() => addQuestion(selectedUnitIndex)}
+            >
+              + Add Question
+            </button>
           </div>
         </div>
       )}
@@ -1831,11 +2062,7 @@ export default function App() {
 
                   <div className="question-number-grid">
                     {selectedUnit.questions.map((q, idx) => {
-                      const response = responses[q.id];
-                      const isAnswered =
-                        q.type === 'mcq'
-                          ? typeof response === 'number'
-                          : typeof response === 'string' && response.trim() !== '';
+                      const isAnswered = hasQuestionAnswered(q, responses[q.id]);
                       const isActive = idx === currentQuestionIndex;
                       const isFlagged = flaggedQuestions.includes(q.id);
 
@@ -1858,7 +2085,12 @@ export default function App() {
                   <div className="question-meta-line">
                     <span className="question-tag">Question {currentQuestion.number}</span>
                     <span className="question-domain">
-                      {currentQuestion.type === 'mcq' ? 'Multiple Choice' : 'Text Response'}
+                      {currentQuestion.type === 'mcq' ? 'Multiple Choice' : 
+                       currentQuestion.type === 'true-false' ? 'True / False' :
+                       currentQuestion.type === 'numerical' ? 'Numerical' :
+                       currentQuestion.type === 'gap-fill' ? 'Gap Fill' :
+                       currentQuestion.type === 'drag-drop' ? 'Drag and Drop' :
+                       currentQuestion.type === 'calc-mcq' ? 'Calculated MCQ' : 'Text Response'}
                     </span>
                   </div>
 
@@ -1874,10 +2106,132 @@ export default function App() {
                   </div>
 
                   <div className="assessment-question-card">
-                    <h3>{currentQuestion.prompt}</h3>
+                    {currentQuestion.type !== 'gap-fill' && currentQuestion.type !== 'drag-drop' && (
+                      <h3>
+                        {currentQuestion.type === 'calc-mcq' 
+                          ? (() => {
+                              const vars = (responses[`${currentQuestion.id}:vars`] as Record<string, number>) || {};
+                              return currentQuestion.prompt.replace(/\[(.*?)\]/g, (match, v) => vars[v] !== undefined ? String(vars[v]) : match);
+                            })()
+                          : currentQuestion.prompt}
+                      </h3>
+                    )}
+
+                    {(currentQuestion.type === 'gap-fill' || currentQuestion.type === 'drag-drop') && (
+                      <h3 className="gap-fill-prompt" style={{ lineHeight: '2' }}>
+                        {currentQuestion.prompt.split(/(\[.*?\])/g).map((part, i) => {
+                          if (part.startsWith('[') && part.endsWith(']')) {
+                            const partsBefore = currentQuestion.prompt.split(/(\[.*?\])/g).slice(0, i);
+                            const blankIndex = partsBefore.filter((p) => p.startsWith('[') && p.endsWith(']')).length;
+                            const curResponses = Array.isArray(responses[currentQuestion.id]) 
+                              ? (responses[currentQuestion.id] as string[]) 
+                              : [];
+                            
+                            if (currentQuestion.type === 'gap-fill') {
+                              return (
+                                <input
+                                  key={i}
+                                  type="text"
+                                  className="text-response-area inline-gap-fill"
+                                  style={{ display: 'inline-block', width: '120px', padding: '4px', margin: '0 8px', minHeight: 'auto' }}
+                                  value={curResponses[blankIndex] || ''}
+                                  onChange={(e) => {
+                                    const next = [...curResponses];
+                                    next[blankIndex] = e.target.value;
+                                    answer(currentQuestion.id, next);
+                                  }}
+                                />
+                              );
+                            } else {
+                              return (
+                                <span
+                                  key={i}
+                                  className="drop-zone"
+                                  style={{
+                                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                    minWidth: '100px', padding: '4px 8px', margin: '0 8px',
+                                    border: '2px dashed #0056b3', minHeight: '32px', backgroundColor: '#f0f8ff',
+                                    verticalAlign: 'middle', cursor: 'pointer', borderRadius: '4px'
+                                  }}
+                                  onDragOver={(e) => e.preventDefault()}
+                                  onDrop={(e) => {
+                                    e.preventDefault();
+                                    const data = e.dataTransfer.getData('text/plain');
+                                    if (data) {
+                                      const next = [...curResponses];
+                                      next[blankIndex] = data;
+                                      answer(currentQuestion.id, next);
+                                    }
+                                  }}
+                                  onClick={() => {
+                                    if (curResponses[blankIndex]) {
+                                      const next = [...curResponses];
+                                      next[blankIndex] = '';
+                                      answer(currentQuestion.id, next);
+                                    }
+                                  }}
+                                >
+                                  {curResponses[blankIndex] || <span style={{ opacity: 0.5, fontSize: '14px' }}>Drop here</span>}
+                                </span>
+                              );
+                            }
+                          }
+                          return <span key={i}>{part}</span>;
+                        })}
+                      </h3>
+                    )}
+
+                    {currentQuestion.type === 'drag-drop' && (
+                      <div className="drag-options-container" style={{ marginTop: '20px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #ddd' }}>
+                        <div style={{ marginBottom: '8px', fontSize: '14px', fontWeight: 'bold' }}>Draggable Options:</div>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          {Array.from(new Set([
+                            ...(currentQuestion.prompt.match(/\[(.*?)\]/g) || []).map((b) => b.slice(1, -1)),
+                            ...currentQuestion.options
+                          ]))
+                            .filter((o) => o?.trim() !== '')
+                            .map((opt, i) => (
+                              <div
+                                key={i}
+                                draggable
+                                onDragStart={(e) => e.dataTransfer.setData('text/plain', opt)}
+                                style={{
+                                  padding: '6px 12px', backgroundColor: '#fff', border: '1px solid #ccc',
+                                  borderRadius: '4px', cursor: 'grab', boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                                }}
+                              >
+                                {opt}
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
 
                     {currentQuestion.image && (
                       <img src={currentQuestion.image} alt="" className="preview-img assessment-img" />
+                    )}
+
+                    {currentQuestion.type === 'calc-mcq' && (
+                      <div className="assessment-options">
+                        {currentQuestion.options.map((opt, i) => {
+                          const vars = (responses[`${currentQuestion.id}:vars`] as Record<string, number>) || {};
+                          const evaluated = evaluateFormula(opt, vars);
+                          const finalDisplay = isNaN(evaluated) ? 'Error in formula' : evaluated;
+
+                          return (
+                            <label key={`${currentQuestion.id}-${i}`} className="assessment-option">
+                              <input
+                                type="radio"
+                                name={currentQuestion.id}
+                                checked={responses[currentQuestion.id] === i}
+                                onChange={() => answer(currentQuestion.id, i)}
+                              />
+                              <span className="option-letter">{String.fromCharCode(65 + i)}</span>
+                              <span>{finalDisplay}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
                     )}
 
                     {currentQuestion.type === 'mcq' && (
@@ -1894,6 +2248,49 @@ export default function App() {
                             <span>{opt}</span>
                           </label>
                         ))}
+                      </div>
+                    )}
+
+                    {currentQuestion.type === 'true-false' && (
+                      <div className="assessment-options">
+                        <label className="assessment-option">
+                          <input
+                            type="radio"
+                            name={currentQuestion.id}
+                            checked={responses[currentQuestion.id] === 0}
+                            onChange={() => answer(currentQuestion.id, 0)}
+                          />
+                          <span className="option-letter">T</span>
+                          <span>True</span>
+                        </label>
+                        <label className="assessment-option">
+                          <input
+                            type="radio"
+                            name={currentQuestion.id}
+                            checked={responses[currentQuestion.id] === 1}
+                            onChange={() => answer(currentQuestion.id, 1)}
+                          />
+                          <span className="option-letter">F</span>
+                          <span>False</span>
+                        </label>
+                      </div>
+                    )}
+
+                    {currentQuestion.type === 'numerical' && (
+                      <div className="text-response-box">
+                        <label className="field-label">Your Numerical Answer</label>
+                        <input
+                          type="number"
+                          className="text-response-area"
+                          style={{ maxWidth: '300px' }}
+                          value={
+                            typeof responses[currentQuestion.id] === 'string'
+                              ? (responses[currentQuestion.id] as string)
+                              : ''
+                          }
+                          onChange={(e) => answer(currentQuestion.id, e.target.value)}
+                          placeholder="Type a number..."
+                        />
                       </div>
                     )}
 
@@ -2369,7 +2766,12 @@ export default function App() {
                       </p>
                       {q.image && <img src={q.image} alt="" className="print-img" />}
                       <p>
-                        <strong>Type:</strong> {q.type === 'mcq' ? 'Multiple Choice' : 'Text Response'}
+                        <strong>Type:</strong> {q.type === 'mcq' ? 'Multiple Choice' : 
+                       q.type === 'true-false' ? 'True / False' :
+                       q.type === 'numerical' ? 'Numerical' :
+                       q.type === 'gap-fill' ? 'Gap Fill' :
+                       q.type === 'drag-drop' ? 'Drag and Drop' :
+                       q.type === 'calc-mcq' ? 'Calculated MCQ' : 'Text Response'}
                       </p>
 
                       {q.type === 'mcq' && (
