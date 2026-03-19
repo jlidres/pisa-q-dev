@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './styles.css';
 
-type QuestionType = 'mcq' | 'text' | 'true-false' | 'numerical' | 'gap-fill' | 'drag-drop' | 'calc-mcq';
-type ResponseValue = string | number | string[] | Record<string, number>;
+type QuestionType = 'mcq' | 'text' | 'true-false' | 'numerical' | 'gap-fill' | 'drag-drop' | 'calc-mcq' | 'table' | 'table-mcq';
+type ResponseValue = string | number | string[] | number[] | Record<string, number>;
 
 type Question = {
   id: string;
@@ -17,6 +17,8 @@ type Question = {
   numericalTolerance?: number;
   calcVariables?: { name: string; min: number; max: number }[];
   calcFormula?: string;
+  tableData?: string[][];
+  matrixAnswers?: number[];
 };
 
 type ArticleBlock = {
@@ -384,8 +386,13 @@ function hasQuestionAnswered(q: Question, response: ResponseValue): boolean {
   if (['mcq', 'true-false', 'calc-mcq'].includes(q.type)) {
     return typeof response === 'number';
   }
-  if (['gap-fill', 'drag-drop'].includes(q.type)) {
-    return Array.isArray(response) && response.some((r) => r.trim() !== '');
+  if (['gap-fill', 'drag-drop', 'table'].includes(q.type)) {
+    return Array.isArray(response) && response.some((r) => String(r).trim() !== '');
+  }
+  if (q.type === 'table-mcq') {
+    return Array.isArray(response) && q.matrixAnswers 
+      ? response.length === q.matrixAnswers.length && response.every((r) => r !== undefined && r !== null) 
+      : false;
   }
   return typeof response === 'string' && response.trim() !== '';
 }
@@ -402,13 +409,21 @@ function gradeQuestion(q: Question, response: ResponseValue): boolean {
     const tol = q.numericalTolerance || 0;
     return Math.abs(numResp - target) <= tol;
   }
-  if (['gap-fill', 'drag-drop'].includes(q.type)) {
+  if (['gap-fill', 'drag-drop', 'table'].includes(q.type)) {
     const arr = Array.isArray(response) ? response : [];
-    const correctAnswers = (q.prompt.match(/\[(.*?)\]/g) || []).map((b) => b.slice(1, -1));
+    const sourceString = q.type === 'table' && q.tableData 
+      ? q.tableData.map(row => row.join(' ')).join(' ') 
+      : q.prompt;
+    const correctAnswers = (sourceString.match(/\[(.*?)\]/g) || []).map((b) => b.slice(1, -1));
     return correctAnswers.every((ans, idx) => {
-      const resp = arr[idx] || '';
+      const resp = String(arr[idx] || '');
       return resp.trim().toLowerCase() === ans.trim().toLowerCase();
     });
+  }
+  if (q.type === 'table-mcq') {
+    const arr = Array.isArray(response) ? response : [];
+    if (!q.matrixAnswers) return false;
+    return q.matrixAnswers.every((ans, idx) => arr[idx] === ans);
   }
   if (typeof response === 'string') {
     return isTextCorrect(response, q.sampleAnswer);
@@ -1717,13 +1732,15 @@ export default function App() {
                   <option value="gap-fill">Gap Fill</option>
                   <option value="drag-drop">Drag and Drop</option>
                   <option value="calc-mcq">Calculated MCQ</option>
+                  <option value="table">Table Response</option>
+                  <option value="table-mcq">Table MCQ (Matrix)</option>
                 </select>
 
                 <div className="field-label">
                   Prompt
-                  {(q.type === 'gap-fill' || q.type === 'drag-drop') && (
+                  {(q.type === 'gap-fill' || q.type === 'drag-drop' || q.type === 'table' || q.type === 'table-mcq') && (
                     <span style={{ fontWeight: 'normal', fontSize: '13px', marginLeft: '8px', color: '#666' }}>
-                      (Wrap words in [brackets] to create blanks. e.g. "The capital is [Paris]")
+                      {['table', 'table-mcq'].includes(q.type) ? '(Use the Reference Table below for the grid)' : '(Wrap words in [brackets] to create blanks. e.g. "The capital is [Paris]")'}
                     </span>
                   )}
                 </div>
@@ -1743,7 +1760,122 @@ export default function App() {
                     if (file) uploadQuestionImage(selectedUnitIndex, qIndex, file);
                   }}
                 />
-                {q.image && <img src={q.image} alt="" className="preview-img" />}
+                {q.image && (
+                  <div style={{ marginTop: '10px' }}>
+                    <img src={q.image} alt="" className="preview-img" style={{ display: 'block', marginBottom: '8px' }} />
+                    <button
+                      className="danger-mini-btn small-btn"
+                      onClick={() => updateQuestionField(selectedUnitIndex, qIndex, 'image', undefined)}
+                    >
+                      Remove Image
+                    </button>
+                  </div>
+                )}
+
+                <div className="field-label" style={{ marginTop: '16px' }}>Reference Table</div>
+                {q.tableData ? (
+                  <div className="admin-table-builder" style={{ marginBottom: '16px', background: '#f8fbff', padding: '12px', border: '1px solid var(--line)', borderRadius: '8px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
+                      <button className="danger-mini-btn small-btn" onClick={() => updateQuestionField(selectedUnitIndex, qIndex, 'tableData', undefined)}>Remove Table</button>
+                    </div>
+                    <div style={{ overflowX: 'auto', paddingBottom: '8px' }}>
+                      <table className="builder-table">
+                        <tbody>
+                          {q.tableData.map((row, rIndex) => (
+                            <tr key={rIndex}>
+                              {row.map((cell, cIndex) => {
+                                if (q.type === 'table-mcq' && rIndex > 0 && cIndex > 0) {
+                                  return (
+                                    <td key={cIndex} style={{ padding: '4px', textAlign: 'center' }}>
+                                      <input
+                                        type="radio"
+                                        name={`admin-matrix-${qIndex}-${rIndex}`}
+                                        checked={q.matrixAnswers?.[rIndex - 1] === cIndex - 1}
+                                        onChange={() => {
+                                          const newAnswers = [...(q.matrixAnswers || new Array(q.tableData!.length - 1).fill(undefined))];
+                                          newAnswers[rIndex - 1] = cIndex - 1;
+                                          updateQuestionField(selectedUnitIndex, qIndex, 'matrixAnswers', newAnswers);
+                                        }}
+                                        style={{ cursor: 'pointer' }}
+                                      />
+                                    </td>
+                                  );
+                                }
+                                return (
+                                  <td key={cIndex} style={{ padding: '4px' }}>
+                                    <input
+                                      value={cell}
+                                      placeholder={q.type === 'table-mcq' && rIndex === 0 && cIndex === 0 ? "Top-Left Label (Optional)" : "Cell text..."}
+                                      style={{ margin: 0, padding: '6px 8px', width: '120px' }}
+                                      onChange={(e) => {
+                                        const newTable = [...q.tableData!];
+                                        newTable[rIndex] = [...newTable[rIndex]];
+                                        newTable[rIndex][cIndex] = e.target.value;
+                                        updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable);
+                                      }}
+                                    />
+                                  </td>
+                                );
+                              })}
+                              <td style={{ verticalAlign: 'middle', border: 'none', background: 'transparent' }}>
+                                <button className="danger-mini-btn small-btn" title="Remove Row" onClick={() => {
+                                  const newTable = q.tableData!.filter((_, idx) => idx !== rIndex);
+                                  updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable.length ? newTable : undefined);
+                                }}>- Row</button>
+                              </td>
+                            </tr>
+                          ))}
+                          <tr>
+                            {q.tableData[0]?.map((_, cIndex) => (
+                               <td key={`col-rem-${cIndex}`} style={{ textAlign: 'center', border: 'none', background: 'transparent' }}>
+                                 <button className="danger-mini-btn small-btn" title="Remove Column" onClick={() => {
+                                   const newTable = q.tableData!.map(r => r.filter((_, idx) => idx !== cIndex));
+                                   updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable[0].length ? newTable : undefined);
+                                 }}>- Col</button>
+                               </td>
+                            ))}
+                            <td style={{ border: 'none', background: 'transparent' }}></td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                      <button className="secondary-btn small-btn" onClick={() => {
+                        const newTable = [...q.tableData!, new Array(q.tableData![0].length).fill('')];
+                        updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable);
+                      }}>+ Add Row</button>
+                      <button className="secondary-btn small-btn" onClick={() => {
+                        const newTable = q.tableData!.map(row => [...row, '']);
+                        updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable);
+                      }}>+ Add Column</button>
+                    </div>
+
+                    {q.type === 'table' && (
+                      <div style={{ marginTop: '16px', background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                        <div className="field-label" style={{ marginTop: 0, color: 'var(--primary)' }}>Correct Answers Extracted</div>
+                        <div style={{ fontSize: '13px', color: '#666', marginBottom: '8px' }}>
+                          Add [brackets] to the Table cells above to define the correct answers for the students to fill in.
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          {(q.tableData.map(row => row.join(' ')).join(' ').match(/\[(.*?)\]/g) || []).map((ans, i) => (
+                            <span key={i} style={{ background: '#fff', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '4px', fontSize: '13px', fontWeight: 600 }}>
+                              Blank {i + 1}: <span style={{ color: 'var(--primary)' }}>{ans.slice(1, -1)}</span>
+                            </span>
+                          ))}
+                          {(q.tableData.map(row => row.join(' ')).join(' ').match(/\[(.*?)\]/g) || []).length === 0 && (
+                            <span style={{ color: '#94a3b8', fontSize: '13px', fontStyle: 'italic' }}>No blanks defined yet...</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button className="secondary-btn small-btn" style={{ marginBottom: '16px' }} onClick={() => {
+                    updateQuestionField(selectedUnitIndex, qIndex, 'tableData', [['Header 1', 'Header 2'], ['Value 1', 'Value 2']]);
+                  }}>
+                    + Add Reference Table
+                  </button>
+                )}
 
                 {q.type === 'mcq' && (
                   <>
@@ -1960,11 +2092,31 @@ export default function App() {
                   </>
                 )}
 
+                {['gap-fill', 'drag-drop'].includes(q.type) && (
+                  <div style={{ marginTop: '16px', background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="field-label" style={{ marginTop: 0, color: 'var(--primary)' }}>Correct Answers Extracted</div>
+                    <div style={{ fontSize: '13px', color: '#666', marginBottom: '8px' }}>
+                      Add [brackets] to the Prompt above to define the correct answers.
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {(q.prompt.match(/\[(.*?)\]/g) || []).map((ans, i) => (
+                        <span key={i} style={{ background: '#fff', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '4px', fontSize: '13px', fontWeight: 600 }}>
+                          Blank {i + 1}: <span style={{ color: 'var(--primary)' }}>{ans.slice(1, -1)}</span>
+                        </span>
+                      ))}
+                      {(q.prompt.match(/\[(.*?)\]/g) || []).length === 0 && (
+                        <span style={{ color: '#94a3b8', fontSize: '13px', fontStyle: 'italic' }}>No blanks defined yet...</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                
                 {q.type === 'text' && (
                   <>
-                    <div className="field-label">Expected / Sample Answer</div>
+                    <div className="field-label">Correct Answer / Sample Answer</div>
                     <textarea
                       value={q.sampleAnswer}
+                      placeholder="Admin will use this string as the golden answer to grade against..."
                       onChange={(e) =>
                         updateQuestionField(selectedUnitIndex, qIndex, 'sampleAnswer', e.target.value)
                       }
@@ -2090,7 +2242,9 @@ export default function App() {
                        currentQuestion.type === 'numerical' ? 'Numerical' :
                        currentQuestion.type === 'gap-fill' ? 'Gap Fill' :
                        currentQuestion.type === 'drag-drop' ? 'Drag and Drop' :
-                       currentQuestion.type === 'calc-mcq' ? 'Calculated MCQ' : 'Text Response'}
+                       currentQuestion.type === 'calc-mcq' ? 'Calculated MCQ' :
+                       currentQuestion.type === 'table' ? 'Table Response' :
+                       currentQuestion.type === 'table-mcq' ? 'Table MCQ (Matrix)' : 'Text Response'}
                     </span>
                   </div>
 
@@ -2209,6 +2363,102 @@ export default function App() {
 
                     {currentQuestion.image && (
                       <img src={currentQuestion.image} alt="" className="preview-img assessment-img" />
+                    )}
+
+                    {currentQuestion.tableData && currentQuestion.tableData.length > 0 && (
+                      <div className="assessment-table-wrap" style={{ overflowX: 'auto', marginBottom: '16px', marginTop: '12px' }}>
+                        <table className="builder-table" style={{ width: '100%', minWidth: '400px' }}>
+                          {currentQuestion.tableData.length > 1 && (
+                            <thead>
+                              <tr>
+                                {currentQuestion.tableData[0].map((header, i) => {
+                                  if (currentQuestion.type === 'table' && header.includes('[')) {
+                                    return <th key={i}>{header}</th>; // Actually, allow parsing headers too if they want
+                                  }
+                                  return <th key={i}>{header}</th>;
+                                })}
+                              </tr>
+                            </thead>
+                          )}
+                          <tbody>
+                            {currentQuestion.tableData.slice(currentQuestion.tableData.length > 1 ? 1 : 0).map((row, r) => (
+                              <tr key={r}>
+                                {row.map((cell, c) => {
+                                  if (currentQuestion.type === 'table-mcq' && c > 0) {
+                                    const curResponses = Array.isArray(responses[currentQuestion.id])
+                                      ? (responses[currentQuestion.id] as number[])
+                                      : new Array(currentQuestion.tableData!.length - 1).fill(undefined);
+                                    
+                                    return (
+                                      <td key={c} style={{ textAlign: 'center' }}>
+                                        <input 
+                                          type="radio"
+                                          name={`student-matrix-${currentQuestion.id}-${r}`}
+                                          checked={curResponses[r] === c - 1}
+                                          onChange={() => {
+                                            const next = [...curResponses];
+                                            next[r] = c - 1;
+                                            answer(currentQuestion.id, next);
+                                          }}
+                                          style={{ width: '20px', height: '20px', cursor: 'pointer', margin: 0 }}
+                                        />
+                                      </td>
+                                    );
+                                  }
+
+                                  if (currentQuestion.type === 'table') {
+                                    // Parse cell for [brackets]
+                                    let cellBlankIndexCount = 0;
+                                    // Count blanks in all PREVIOUS cells (headers, earlier rows, earlier cols)
+                                    if (currentQuestion.tableData) {
+                                      const flatTable = currentQuestion.tableData.flat();
+                                      const rowOffset = currentQuestion.tableData.length > 1 ? 1 : 0;
+                                      const flatIndexToHere = (r + rowOffset) * currentQuestion.tableData[0].length + c;
+                                      const tableBefore = flatTable.slice(0, flatIndexToHere).join(' ');
+                                      cellBlankIndexCount = (tableBefore.match(/\[(.*?)\]/g) || []).length;
+                                    }
+
+                                    const curResponses = Array.isArray(responses[currentQuestion.id])
+                                      ? (responses[currentQuestion.id] as string[])
+                                      : [];
+
+                                    return (
+                                      <td key={c}>
+                                        {cell.split(/(\[.*?\])/g).map((part, i) => {
+                                          if (part.startsWith('[') && part.endsWith(']')) {
+                                            const partsBeforeInCell = cell.split(/(\[.*?\])/g).slice(0, i);
+                                            const blankInCell = partsBeforeInCell.filter(p => p.startsWith('[') && p.endsWith(']')).length;
+                                            const overallBlankIndex = cellBlankIndexCount + blankInCell;
+
+                                            return (
+                                              <input
+                                                key={i}
+                                                type="text"
+                                                className="text-response-area inline-gap-fill"
+                                                style={{ display: 'inline-block', width: '90px', padding: '4px', margin: '4px', minHeight: 'auto', border: '1px solid #cad5e2' }}
+                                                value={curResponses[overallBlankIndex] || ''}
+                                                onChange={(e) => {
+                                                  const next = [...curResponses];
+                                                  next[overallBlankIndex] = e.target.value;
+                                                  answer(currentQuestion.id, next);
+                                                }}
+                                              />
+                                            );
+                                          }
+                                          return <span key={i}>{part}</span>;
+                                        })}
+                                      </td>
+                                    );
+                                  }
+                                  
+                                  // Standard rendering for non-table types
+                                  return <td key={c}>{cell}</td>;
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     )}
 
                     {currentQuestion.type === 'calc-mcq' && (
