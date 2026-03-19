@@ -91,11 +91,15 @@ type StudentProfile = {
 };
 
 type UserRole = 'guest' | 'student' | 'admin';
+type Subject = 'chemistry' | 'earth_science' | 'life_science' | 'physics';
+type Grade = 'Grade 6' | 'Grade 7' | 'Grade 8' | 'Grade 9';
 
-const PROGRESS_STORAGE_KEY = 'pisa_q_dev_progress_v6';
-const BUILDER_STORAGE_KEY = 'pisa_q_dev_builder_v3';
+const PROGRESS_STORAGE_KEY_PREFIX = 'pisa_q_dev_progress_v6';
+const BUILDER_STORAGE_KEY_PREFIX = 'pisa_q_dev_builder_v3';
 const USER_ROLE_STORAGE_KEY = 'pisa_q_dev_user_role_v2';
 const STUDENT_PROFILE_STORAGE_KEY = 'pisa_q_dev_student_profile_v2';
+const SUBJECT_STORAGE_KEY = 'pisa_q_dev_subject';
+const GRADE_STORAGE_KEY = 'pisa_q_dev_grade';
 const DEFAULT_TIME_SECONDS = 30 * 60;
 const MAX_UNITS = 5;
 const MAX_QUESTIONS = 5;
@@ -311,9 +315,10 @@ function createInitialUnits(): Unit[] {
   return [createSampleUnit(1), createBlankUnit(2), createBlankUnit(3)];
 }
 
-function loadSavedProgress(): SavedProgress | null {
+function loadSavedProgress(subject: Subject | null, grade: Grade | null): SavedProgress | null {
+  if (!subject || !grade) return null;
   try {
-    const raw = localStorage.getItem(PROGRESS_STORAGE_KEY);
+    const raw = localStorage.getItem(`${PROGRESS_STORAGE_KEY_PREFIX}_${subject}_${grade}`);
     if (!raw) return null;
     return JSON.parse(raw) as SavedProgress;
   } catch {
@@ -431,10 +436,13 @@ function gradeQuestion(q: Question, response: ResponseValue): boolean {
   return false;
 }
 
-async function fetchPublishedUnits(): Promise<Unit[] | null> {
+async function fetchPublishedUnits(subject: Subject | null, grade: Grade | null): Promise<Unit[] | null> {
+  if (!subject || !grade) return null;
   try {
     const base = import.meta.env.BASE_URL || '/';
-    const res = await fetch(`${base}test-data.json`, { cache: 'no-store' });
+    const formattedGrade = grade.toLowerCase().replace(/\s+/g, '');
+    const filename = `${subject}-${formattedGrade}.json`;
+    const res = await fetch(`${base}${filename}`, { cache: 'no-store' });
 
     if (!res.ok) {
       console.warn('test-data.json request failed with status:', res.status);
@@ -468,13 +476,18 @@ export default function App() {
   const [adminPin, setAdminPin] = useState('');
   const [adminPinError, setAdminPinError] = useState('');
 
+  const [subject, setSubject] = useState<Subject | null>(() => (localStorage.getItem(SUBJECT_STORAGE_KEY) as Subject) || null);
+  const [grade, setGrade] = useState<Grade | null>(() => (localStorage.getItem(GRADE_STORAGE_KEY) as Grade) || null);
+  const [subjectForm, setSubjectForm] = useState<Subject | ''>(() => (localStorage.getItem(SUBJECT_STORAGE_KEY) as Subject) || '');
+  const [gradeForm, setGradeForm] = useState<Grade | ''>(() => (localStorage.getItem(GRADE_STORAGE_KEY) as Grade) || '');
+
   const [view, setView] = useState<'admin' | 'assessment' | 'analytics' | 'print'>('assessment');
   const [assessmentMode, setAssessmentMode] = useState<'question' | 'review'>('question');
   const [units, setUnits] = useState<Unit[]>([]);
   const [isLoadingUnits, setIsLoadingUnits] = useState(true);
   const [dataSourceLabel, setDataSourceLabel] = useState<string>('Loading...');
 
-  const savedProgress = loadSavedProgress();
+  const [savedProgress, setSavedProgress] = useState<SavedProgress | null>(() => loadSavedProgress((localStorage.getItem(SUBJECT_STORAGE_KEY) as Subject) || null, (localStorage.getItem(GRADE_STORAGE_KEY) as Grade) || null));
 
   const [selectedUnitIndex, setSelectedUnitIndex] = useState(savedProgress?.selectedUnitIndex ?? 0);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(savedProgress?.currentQuestionIndex ?? 0);
@@ -487,15 +500,35 @@ export default function App() {
   const [previewUnitIndex, setPreviewUnitIndex] = useState<number | null>(null);
 
   useEffect(() => {
+    const prog = loadSavedProgress(subject, grade);
+    setSavedProgress(prog);
+    setSelectedUnitIndex(prog?.selectedUnitIndex ?? 0);
+    setCurrentQuestionIndex(prog?.currentQuestionIndex ?? 0);
+    setActiveStimulusIndex(prog?.activeStimulusIndex ?? 0);
+    setResponses(prog?.responses ?? {});
+    setFlaggedQuestions(prog?.flaggedQuestions ?? []);
+    setTimeRemaining(prog?.timeRemaining ?? DEFAULT_TIME_SECONDS);
+    
+    if (subject && grade) {
+      localStorage.setItem(SUBJECT_STORAGE_KEY, subject);
+      localStorage.setItem(GRADE_STORAGE_KEY, grade);
+    }
+  }, [subject, grade]);
+
+  useEffect(() => {
     async function loadUnits() {
       setIsLoadingUnits(true);
-
+      if (!subject || !grade) {
+        setUnits([]);
+        setIsLoadingUnits(false);
+        return;
+      }
       try {
         if (userRole === 'student') {
-          const publishedUnits = await fetchPublishedUnits();
+          const publishedUnits = await fetchPublishedUnits(subject, grade);
           if (publishedUnits) {
             setUnits(publishedUnits);
-            setDataSourceLabel('Published test-data.json');
+            setDataSourceLabel(`Published ${subject}-${grade.replace(/\s+/g, '')}.json`);
             return;
           }
 
@@ -504,17 +537,17 @@ export default function App() {
           return;
         }
 
-        const localBuilder = localStorage.getItem(BUILDER_STORAGE_KEY);
+        const localBuilder = localStorage.getItem(`${BUILDER_STORAGE_KEY_PREFIX}_${subject}_${grade}`);
         if (localBuilder) {
           setUnits(JSON.parse(localBuilder));
           setDataSourceLabel('Local admin draft');
           return;
         }
 
-        const publishedUnits = await fetchPublishedUnits();
+        const publishedUnits = await fetchPublishedUnits(subject, grade);
         if (publishedUnits) {
           setUnits(publishedUnits);
-          setDataSourceLabel('Published test-data.json');
+          setDataSourceLabel(`Published ${subject}-${grade.replace(/\s+/g, '')}.json`);
           return;
         }
 
@@ -530,7 +563,7 @@ export default function App() {
     }
 
     loadUnits();
-  }, [userRole]);
+  }, [userRole, subject, grade]);
 
   useEffect(() => {
     localStorage.setItem(USER_ROLE_STORAGE_KEY, userRole);
@@ -553,6 +586,7 @@ export default function App() {
   }, [view, userRole]);
 
   useEffect(() => {
+    if (!subject || !grade) return;
     const payload: SavedProgress = {
       selectedUnitIndex,
       currentQuestionIndex,
@@ -561,7 +595,7 @@ export default function App() {
       flaggedQuestions,
       timeRemaining,
     };
-    localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(`${PROGRESS_STORAGE_KEY_PREFIX}_${subject}_${grade}`, JSON.stringify(payload));
   }, [
     selectedUnitIndex,
     currentQuestionIndex,
@@ -569,21 +603,24 @@ export default function App() {
     responses,
     flaggedQuestions,
     timeRemaining,
+    subject,
+    grade,
   ]);
 
   useEffect(() => {
     if (!units.length) return;
     if (userRole !== 'admin') return;
+    if (!subject || !grade) return;
 
     setSaveStatus('Saving...');
     const timer = window.setTimeout(() => {
-      localStorage.setItem(BUILDER_STORAGE_KEY, JSON.stringify(units));
+      localStorage.setItem(`${BUILDER_STORAGE_KEY_PREFIX}_${subject}_${grade}`, JSON.stringify(units));
       setSaveStatus('Saved');
       setBuilderSavedAt(new Date().toLocaleString());
     }, 450);
 
     return () => window.clearTimeout(timer);
-  }, [units, userRole]);
+  }, [units, userRole, subject, grade]);
 
   useEffect(() => {
     if (userRole === 'student') {
@@ -601,7 +638,8 @@ export default function App() {
   const previewUnit = previewUnitIndex !== null ? units[previewUnitIndex] : null;
 
   function saveBuilderNow() {
-    localStorage.setItem(BUILDER_STORAGE_KEY, JSON.stringify(units));
+    if (!subject || !grade) return;
+    localStorage.setItem(`${BUILDER_STORAGE_KEY_PREFIX}_${subject}_${grade}`, JSON.stringify(units));
     setSaveStatus('Saved');
     setBuilderSavedAt(new Date().toLocaleString());
     setDataSourceLabel('Local admin draft');
@@ -610,7 +648,7 @@ export default function App() {
   function resetBuilder() {
     const fresh = createInitialUnits();
     setUnits(fresh);
-    localStorage.removeItem(BUILDER_STORAGE_KEY);
+    if (subject && grade) localStorage.removeItem(`${BUILDER_STORAGE_KEY_PREFIX}_${subject}_${grade}`);
     setSelectedUnitIndex(0);
     setCurrentQuestionIndex(0);
     setActiveStimulusIndex(0);
@@ -627,25 +665,38 @@ export default function App() {
     setActiveStimulusIndex(0);
     setTimeRemaining(DEFAULT_TIME_SECONDS);
     setAssessmentMode('question');
-    localStorage.removeItem(PROGRESS_STORAGE_KEY);
+    if (subject && grade) localStorage.removeItem(`${PROGRESS_STORAGE_KEY_PREFIX}_${subject}_${grade}`);
   }
 
   function handleLogout() {
     setUserRole('guest');
     setAdminPin('');
     setAdminPinError('');
+    setSubject(null);
+    setGrade(null);
+    setSubjectForm('');
+    setGradeForm('');
   }
 
   function handleStudentStart() {
     const { name, school, gradeLevel, section } = studentForm;
     if (!name.trim() || !school.trim() || !gradeLevel.trim() || !section.trim()) return;
+    if (!subjectForm || !gradeForm) return;
     setStudentProfile(studentForm);
+    setSubject(subjectForm);
+    setGrade(gradeForm);
     setUserRole('student');
     setView('assessment');
   }
 
   function handleAdminLogin() {
     if (adminPin === ADMIN_PIN) {
+      if (!subjectForm || !gradeForm) {
+        setAdminPinError('Select Subject and Grade');
+        return;
+      }
+      setSubject(subjectForm);
+      setGrade(gradeForm);
       setUserRole('admin');
       setAdminPin('');
       setAdminPinError('');
@@ -671,7 +722,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'test-data.json';
+    a.download = subject && grade ? `${subject}-${grade.toLowerCase().replace(/\\s+/g, '')}.json` : 'test-data.json';
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -1221,6 +1272,34 @@ export default function App() {
           <div className="entry-card role-card">
             <h1>SDO - San Juan City PISA Type Assessment</h1>
             <p className="page-subtitle">Pinaglabanan St, San Juan City</p>
+
+            <div style={{ marginBottom: '20px', padding: '16px', background: '#f5f5f5', borderRadius: '8px' }}>
+              <div className="field-label" style={{ marginTop: 0 }}>Select Subject</div>
+              <select 
+                value={subjectForm} 
+                onChange={(e) => setSubjectForm(e.target.value as Subject)}
+                style={{ width: '100%', padding: '8px', marginBottom: '16px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '1rem' }}
+              >
+                <option value="">-- Choose Subject --</option>
+                <option value="chemistry">Chemistry</option>
+                <option value="earth_science">Earth Science</option>
+                <option value="life_science">Life Science</option>
+                <option value="physics">Physics</option>
+              </select>
+
+              <div className="field-label">Select Grade</div>
+              <select 
+                value={gradeForm} 
+                onChange={(e) => setGradeForm(e.target.value as Grade)}
+                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '1rem' }}
+              >
+                <option value="">-- Choose Grade --</option>
+                <option value="Grade 6">Grade 6</option>
+                <option value="Grade 7">Grade 7</option>
+                <option value="Grade 8">Grade 8</option>
+                <option value="Grade 9">Grade 9</option>
+              </select>
+            </div>
 
             <div className="role-grid">
               <div className="role-panel">
