@@ -1,5 +1,5 @@
 {
-  "exportedAt": "2026-03-19T06:09:23.136Z",
+  "exportedAt": "2026-03-19T07:29:01.452Z",
   "units": [
     {
       "id": "unit-1",
@@ -96,14 +96,14 @@
         {
           "id": "q-ffdgs3hw",
           "number": 5,
-          "type": "mcq",
-          "prompt": "",
+          "type": "drag-drop",
+          "prompt": "Drag your answer [], drag the answer 2 here []. ",
           "image": "",
           "options": [
-            "",
-            "",
-            "",
-            ""
+            "Distractor 1",
+            "Disractor 2",
+            "Distractor 3",
+            "Distrctor 4"
           ],
           "correctAnswer": 0,
           "sampleAnswer": "",
@@ -167,8 +167,8 @@
         {
           "id": "q-2of87gbw",
           "number": 1,
-          "type": "text",
-          "prompt": "Marra selects a particle with the symbol. She tries to drop it into the Outer Rings, but the game displays an error message: \"Invalid Location for this Mass.\"\nBased on the table, where must Marra place the particle, and which particle should she have selected if she wanted to place something in the Outer Rings?\n\nPlacement for : \n1.___________\n\nCorrect particle for Rings:\n2. ___________",
+          "type": "gap-fill",
+          "prompt": "Marra selects a particle with the symbol. She tries to drop it into the Outer Rings, but the game displays an error message: \"Invalid Location for this Mass.\"\nBased on the table, where must Marra place the particle, and which particle should she have selected if she wanted to place something in the Outer Rings?\n\nPlacement for [] . Correct particle for Rings []",
           "image": "",
           "options": [
             "",
@@ -177,7 +177,7 @@
             ""
           ],
           "correctAnswer": 0,
-          "sampleAnswer": "Nucleus, Electron"
+          "sampleAnswer": ""
         },
         {
           "id": "q-606j3svp",
@@ -228,13 +228,13 @@
           "id": "q-3s4us50g",
           "number": 5,
           "type": "drag-drop",
-          "prompt": "",
+          "prompt": "This is the first answer [], this the second answer [].",
           "image": "",
           "options": [
-            "",
-            "",
-            "",
-            ""
+            "Answer 1",
+            "Answer 2",
+            "Answer 3",
+            "Answer 4"
           ],
           "correctAnswer": 0,
           "sampleAnswer": "",
