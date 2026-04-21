@@ -94,19 +94,132 @@ type UserRole = 'guest' | 'student' | 'admin';
 type Subject = 'chemistry' | 'earth_science' | 'life_science' | 'physics';
 type Grade = 'Grade 6' | 'Grade 7' | 'Grade 8' | 'Grade 9';
 
+type BuilderIssue = {
+  id: string;
+  unitIndex: number;
+  questionNumber?: number;
+  severity: 'error' | 'warning';
+  message: string;
+};
+
+type BuilderUnitSummary = {
+  unitIndex: number;
+  title: string;
+  readyQuestions: number;
+  totalQuestions: number;
+  issueCount: number;
+};
+
+type BuilderSummary = {
+  totalUnits: number;
+  totalQuestions: number;
+  readyQuestions: number;
+  issues: BuilderIssue[];
+  unitSummaries: BuilderUnitSummary[];
+};
+
+type AssessmentPayload = {
+  subject: string;
+  grade: string;
+  exportedAt?: string;
+  source?: string;
+  units: Unit[];
+};
+
+type AssessmentVersion = {
+  id: string;
+  version_number: number;
+  status: 'draft' | 'published';
+  payload: AssessmentPayload;
+  created_at: string;
+  published_at: string | null;
+};
+
+type ApiEnvelope<T> = {
+  data: T;
+};
+
+type AnalyticsOverview = {
+  totalAttempts: number;
+  latestAttemptAt: string | null;
+  scope: {
+    subject: string | null;
+    grade: string | null;
+  };
+};
+
+type AttemptSubmission = {
+  id: string;
+  submitted_at: string;
+};
+
+type AdminSession = {
+  token: string;
+  expiresAt: string;
+  username: string;
+  displayName: string;
+};
+
 const PROGRESS_STORAGE_KEY_PREFIX = 'pisa_q_dev_progress_v6';
 const BUILDER_STORAGE_KEY_PREFIX = 'pisa_q_dev_builder_v3';
 const USER_ROLE_STORAGE_KEY = 'pisa_q_dev_user_role_v2';
 const STUDENT_PROFILE_STORAGE_KEY = 'pisa_q_dev_student_profile_v2';
+const ADMIN_SESSION_STORAGE_KEY = 'pisa_q_dev_admin_session_v1';
 const SUBJECT_STORAGE_KEY = 'pisa_q_dev_subject';
 const GRADE_STORAGE_KEY = 'pisa_q_dev_grade';
 const DEFAULT_TIME_SECONDS = 30 * 60;
 const MAX_UNITS = 5;
 const MAX_QUESTIONS = 5;
-const ADMIN_PIN = '123654';
+const API_BASE_PATH = '/api';
 
 function uid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function formatGradeSlug(grade: Grade | string) {
+  return grade.toLowerCase().replace(/\s+/g, '');
+}
+
+function formatPublishedFilename(subject: Subject | string, grade: Grade | string) {
+  return `${subject}-${formatGradeSlug(grade)}.json`;
+}
+
+function formatTimestampLabel(prefix: string, timestamp?: string | null) {
+  return timestamp ? `${prefix} ${new Date(timestamp).toLocaleString()}` : prefix;
+}
+
+async function requestApi<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+
+  if (init?.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const response = await fetch(`${API_BASE_PATH}${path}`, {
+    cache: init?.method && init.method !== 'GET' ? 'default' : 'no-store',
+    ...init,
+    headers,
+  });
+
+  if (!response.ok) {
+    const error = new Error(`API request failed with status ${response.status}`) as Error & {
+      status?: number;
+    };
+    error.status = response.status;
+    throw error;
+  }
+
+  return (await response.json()) as T;
+}
+
+function withAdminAuthorization(token: string, init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+
+  return {
+    ...init,
+    headers,
+  };
 }
 
 function createQuestion(index: number): Question {
@@ -315,6 +428,396 @@ function createInitialUnits(): Unit[] {
   return [createSampleUnit(1), createBlankUnit(2), createBlankUnit(3)];
 }
 
+function createQuestionTableTemplate() {
+  return [['Header 1', 'Header 2'], ['Value 1', 'Value 2']];
+}
+
+function createMatrixTableTemplate() {
+  return [
+    ['Statement', 'Choice A', 'Choice B'],
+    ['Row 1', '', ''],
+    ['Row 2', '', ''],
+  ];
+}
+
+function extractBracketAnswers(source: string) {
+  return (source.match(/\[(.*?)\]/g) || []).map((item) => item.slice(1, -1).trim()).filter(Boolean);
+}
+
+function cloneStimulusBlock(block: StimulusBlock): StimulusBlock {
+  if (block.type === 'article') {
+    return { ...block, id: uid('article') };
+  }
+
+  if (block.type === 'table') {
+    return {
+      ...block,
+      id: uid('table'),
+      headers: [...block.headers],
+      rows: block.rows.map((row) => [...row]),
+    };
+  }
+
+  if (block.type === 'chart') {
+    return {
+      ...block,
+      id: uid('chart'),
+      bars: block.bars.map((bar) => ({ ...bar, id: uid('bar') })),
+    };
+  }
+
+  return { ...block, id: uid('visual') };
+}
+
+function cloneQuestion(question: Question, index: number): Question {
+  return {
+    ...question,
+    id: uid('q'),
+    number: index + 1,
+    options: [...question.options],
+    calcVariables: question.calcVariables?.map((item) => ({ ...item })),
+    tableData: question.tableData?.map((row) => [...row]),
+    matrixAnswers: question.matrixAnswers ? [...question.matrixAnswers] : undefined,
+  };
+}
+
+function duplicateUnitFromSource(unit: Unit, index: number): Unit {
+  return {
+    ...unit,
+    id: uid('unit'),
+    title: unit.title.trim() ? `${unit.title} Copy` : `Unit ${index + 1}`,
+    questions: renumberQuestions(unit.questions.map((question, questionIndex) => cloneQuestion(question, questionIndex))),
+    stimulusBlocks: unit.stimulusBlocks.map((block) => cloneStimulusBlock(block)),
+  };
+}
+
+function normalizeQuestionForType(question: Question, nextType: QuestionType): Question {
+  const baseQuestion: Question = {
+    ...question,
+    type: nextType,
+  };
+
+  if (nextType === 'mcq') {
+    return {
+      ...baseQuestion,
+      options: question.options.length ? [...question.options.slice(0, 4), ...Array(Math.max(0, 4 - question.options.length)).fill('')] : ['', '', '', ''],
+      correctAnswer: Math.min(question.correctAnswer ?? 0, 3),
+      sampleAnswer: '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'text') {
+    return {
+      ...baseQuestion,
+      options: ['', '', '', ''],
+      sampleAnswer: question.sampleAnswer || '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'true-false') {
+    return {
+      ...baseQuestion,
+      options: ['True', 'False', '', ''],
+      correctAnswer: question.correctAnswer === 1 ? 1 : 0,
+      sampleAnswer: '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'numerical') {
+    return {
+      ...baseQuestion,
+      options: ['', '', '', ''],
+      sampleAnswer: '',
+      numericalAnswer: question.numericalAnswer ?? 0,
+      numericalTolerance: question.numericalTolerance ?? 0,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'gap-fill') {
+    return {
+      ...baseQuestion,
+      options: ['', '', '', ''],
+      sampleAnswer: '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'drag-drop') {
+    return {
+      ...baseQuestion,
+      options: question.options.some((option) => option.trim()) ? [...question.options] : ['', '', '', ''],
+      sampleAnswer: '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'calc-mcq') {
+    return {
+      ...baseQuestion,
+      options: question.options.length ? [...question.options.slice(0, 4), ...Array(Math.max(0, 4 - question.options.length)).fill('')] : ['', '', '', ''],
+      correctAnswer: Math.min(question.correctAnswer ?? 0, 3),
+      sampleAnswer: '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: question.calcVariables?.length ? question.calcVariables.map((item) => ({ ...item })) : [{ name: 'x', min: 1, max: 10 }],
+      calcFormula: question.calcFormula || '',
+      tableData: undefined,
+      matrixAnswers: undefined,
+    };
+  }
+
+  if (nextType === 'table') {
+    return {
+      ...baseQuestion,
+      options: ['', '', '', ''],
+      sampleAnswer: '',
+      numericalAnswer: undefined,
+      numericalTolerance: undefined,
+      calcVariables: undefined,
+      calcFormula: undefined,
+      tableData: question.tableData?.map((row) => [...row]) || createQuestionTableTemplate(),
+      matrixAnswers: undefined,
+    };
+  }
+
+  const matrixTable = question.tableData?.map((row) => [...row]) || createMatrixTableTemplate();
+  const expectedRows = Math.max(matrixTable.length - 1, 0);
+
+  return {
+    ...baseQuestion,
+    options: ['', '', '', ''],
+    sampleAnswer: '',
+    numericalAnswer: undefined,
+    numericalTolerance: undefined,
+    calcVariables: undefined,
+    calcFormula: undefined,
+    tableData: matrixTable,
+    matrixAnswers:
+      question.matrixAnswers && question.matrixAnswers.length === expectedRows
+        ? [...question.matrixAnswers]
+        : Array(expectedRows).fill(-1),
+  };
+}
+
+function buildBuilderSummary(units: Unit[]): BuilderSummary {
+  const issues: BuilderIssue[] = [];
+  const unitSummaries: BuilderUnitSummary[] = [];
+  let readyQuestions = 0;
+
+  units.forEach((unit, unitIndex) => {
+    const unitIssueStart = issues.length;
+
+    if (!unit.title.trim()) {
+      issues.push({
+        id: `${unit.id}-missing-title`,
+        unitIndex,
+        severity: 'error',
+        message: `Unit ${unitIndex + 1} is missing a title.`,
+      });
+    }
+
+    if (!unit.competency.trim()) {
+      issues.push({
+        id: `${unit.id}-missing-competency`,
+        unitIndex,
+        severity: 'warning',
+        message: `${unit.title || `Unit ${unitIndex + 1}`} has no learning competency yet.`,
+      });
+    }
+
+    const hasFilledStimulus = unit.stimulusBlocks.some((block) => {
+      if (block.type === 'article') return Boolean(block.content.trim() || block.image);
+      if (block.type === 'table') return block.rows.some((row) => row.some((cell) => cell.trim()));
+      if (block.type === 'chart') return block.bars.some((bar) => bar.label.trim() || bar.value !== 0);
+      return Boolean(block.note.trim() || block.image);
+    });
+
+    if (!hasFilledStimulus) {
+      issues.push({
+        id: `${unit.id}-missing-stimulus`,
+        unitIndex,
+        severity: 'warning',
+        message: `${unit.title || `Unit ${unitIndex + 1}`} still has no completed stimulus content.`,
+      });
+    }
+
+    unit.questions.forEach((question) => {
+      const questionIssueStart = issues.length;
+
+      if (!question.prompt.trim()) {
+        issues.push({
+          id: `${question.id}-missing-prompt`,
+          unitIndex,
+          questionNumber: question.number,
+          severity: 'error',
+          message: `Q${question.number} needs a prompt.`,
+        });
+      }
+
+      if (question.type === 'mcq' || question.type === 'calc-mcq') {
+        const filledOptions = question.options.filter((option) => option.trim()).length;
+        if (filledOptions < 4) {
+          issues.push({
+            id: `${question.id}-missing-options`,
+            unitIndex,
+            questionNumber: question.number,
+            severity: 'error',
+            message: `Q${question.number} needs four answer choices.`,
+          });
+        }
+
+        if (!question.options[question.correctAnswer]?.trim()) {
+          issues.push({
+            id: `${question.id}-missing-correct-option`,
+            unitIndex,
+            questionNumber: question.number,
+            severity: 'error',
+            message: `Q${question.number} points to an empty correct answer.`,
+          });
+        }
+      }
+
+      if (question.type === 'text' && !question.sampleAnswer.trim()) {
+        issues.push({
+          id: `${question.id}-missing-sample-answer`,
+          unitIndex,
+          questionNumber: question.number,
+          severity: 'warning',
+          message: `Q${question.number} has no sample answer for grading guidance.`,
+        });
+      }
+
+      if ((question.type === 'gap-fill' || question.type === 'drag-drop') && extractBracketAnswers(question.prompt).length === 0) {
+        issues.push({
+          id: `${question.id}-missing-blanks`,
+          unitIndex,
+          questionNumber: question.number,
+          severity: 'error',
+          message: `Q${question.number} needs bracketed answers like [example].`,
+        });
+      }
+
+      if (question.type === 'drag-drop' && question.options.filter((option) => option.trim()).length === 0) {
+        issues.push({
+          id: `${question.id}-missing-distractors`,
+          unitIndex,
+          questionNumber: question.number,
+          severity: 'warning',
+          message: `Q${question.number} has no distractor bank yet.`,
+        });
+      }
+
+      if (question.type === 'table') {
+        if (!question.tableData?.length) {
+          issues.push({
+            id: `${question.id}-missing-table`,
+            unitIndex,
+            questionNumber: question.number,
+            severity: 'error',
+            message: `Q${question.number} needs a reference table.`,
+          });
+        } else if (extractBracketAnswers(question.tableData.map((row) => row.join(' ')).join(' ')).length === 0) {
+          issues.push({
+            id: `${question.id}-missing-table-blanks`,
+            unitIndex,
+            questionNumber: question.number,
+            severity: 'error',
+            message: `Q${question.number} has a table but no bracketed blanks for student input.`,
+          });
+        }
+      }
+
+      if (question.type === 'table-mcq') {
+        const rowCount = question.tableData?.length ?? 0;
+        const colCount = question.tableData?.[0]?.length ?? 0;
+        const validAnswers = question.matrixAnswers?.filter((answer) => answer >= 0).length ?? 0;
+
+        if (rowCount < 2 || colCount < 3) {
+          issues.push({
+            id: `${question.id}-invalid-matrix-shape`,
+            unitIndex,
+            questionNumber: question.number,
+            severity: 'error',
+            message: `Q${question.number} needs at least 1 statement row and 2 answer columns.`,
+          });
+        }
+
+        if (validAnswers !== Math.max(rowCount - 1, 0)) {
+          issues.push({
+            id: `${question.id}-missing-matrix-answers`,
+            unitIndex,
+            questionNumber: question.number,
+            severity: 'error',
+            message: `Q${question.number} needs one correct column selected for each matrix row.`,
+          });
+        }
+      }
+
+      if (question.type === 'calc-mcq' && !(question.calcVariables?.every((item) => item.name.trim()) && question.calcVariables.length > 0)) {
+        issues.push({
+          id: `${question.id}-missing-calc-vars`,
+          unitIndex,
+          questionNumber: question.number,
+          severity: 'warning',
+          message: `Q${question.number} needs named variables for the calculated prompt.`,
+        });
+      }
+
+      if (issues.length === questionIssueStart) {
+        readyQuestions += 1;
+      }
+    });
+
+    unitSummaries.push({
+      unitIndex,
+      title: unit.title || `Unit ${unitIndex + 1}`,
+      readyQuestions: readyQuestions - unitSummaries.reduce((sum, item) => sum + item.readyQuestions, 0),
+      totalQuestions: unit.questions.length,
+      issueCount: issues.length - unitIssueStart,
+    });
+  });
+
+  return {
+    totalUnits: units.length,
+    totalQuestions: units.reduce((sum, unit) => sum + unit.questions.length, 0),
+    readyQuestions,
+    issues,
+    unitSummaries,
+  };
+}
+
 function loadSavedProgress(subject: Subject | null, grade: Grade | null): SavedProgress | null {
   if (!subject || !grade) return null;
   try {
@@ -329,10 +832,27 @@ function loadSavedProgress(subject: Subject | null, grade: Grade | null): SavedP
 function loadSavedRole(): UserRole {
   try {
     const raw = localStorage.getItem(USER_ROLE_STORAGE_KEY);
-    if (raw === 'student' || raw === 'admin') return raw;
+    const hasAdminSession = Boolean(loadSavedAdminSession());
+    if (raw === 'admin') return hasAdminSession ? 'admin' : 'guest';
+    if (raw === 'student') return raw;
     return 'guest';
   } catch {
     return 'guest';
+  }
+}
+
+function loadSavedAdminSession(): AdminSession | null {
+  try {
+    const raw = localStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as AdminSession;
+    if (!parsed.token || !parsed.expiresAt) return null;
+    if (Date.parse(parsed.expiresAt) <= Date.now()) return null;
+
+    return parsed;
+  } catch {
+    return null;
   }
 }
 
@@ -436,12 +956,120 @@ function gradeQuestion(q: Question, response: ResponseValue): boolean {
   return false;
 }
 
-async function fetchPublishedUnits(subject: Subject | null, grade: Grade | null): Promise<Unit[] | null> {
+async function fetchPublishedUnitsFromApi(
+  subject: Subject | null,
+  grade: Grade | null
+): Promise<{ units: Unit[]; label: string } | null> {
+  if (!subject || !grade) return null;
+
+  const params = new URLSearchParams({ subject, grade });
+
+  try {
+    const result = await requestApi<ApiEnvelope<AssessmentVersion | null>>(
+      `/assessments/published?${params.toString()}`
+    );
+    const published = result.data;
+
+    if (published && Array.isArray(published.payload?.units) && published.payload.units.length > 0) {
+      return {
+        units: published.payload.units,
+        label: `Neon published v${published.version_number}`,
+      };
+    }
+  } catch (error) {
+    console.warn('Failed to fetch published assessment from API:', error);
+  }
+
+  return null;
+}
+
+async function fetchDraftUnitsFromApi(
+  subject: Subject | null,
+  grade: Grade | null,
+  adminToken: string
+): Promise<{ units: Unit[]; label: string } | null> {
+  if (!subject || !grade) return null;
+
+  const params = new URLSearchParams({ subject, grade });
+
+  try {
+    const result = await requestApi<ApiEnvelope<AssessmentVersion | null>>(
+      `/admin/drafts?${params.toString()}`,
+      withAdminAuthorization(adminToken)
+    );
+    const draft = result.data;
+
+    if (draft && Array.isArray(draft.payload?.units) && draft.payload.units.length > 0) {
+      return {
+        units: draft.payload.units,
+        label: `Neon draft v${draft.version_number}`,
+      };
+    }
+  } catch (error) {
+    console.warn('Failed to fetch draft assessment from API:', error);
+  }
+
+  return null;
+}
+
+async function createAdminSession(username: string, password: string) {
+  return requestApi<AdminSession>('/admin/session', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+async function saveDraftToApi(subject: Subject, grade: Grade, units: Unit[], adminToken: string) {
+  return requestApi<AssessmentVersion>('/admin/drafts', withAdminAuthorization(adminToken, {
+    method: 'PUT',
+    body: JSON.stringify({
+      subject,
+      grade,
+      units,
+      exportedAt: new Date().toISOString(),
+      source: 'builder-ui',
+      actor: 'admin',
+    }),
+  }));
+}
+
+async function publishDraftToApi(subject: Subject, grade: Grade, adminToken: string) {
+  return requestApi<AssessmentVersion>('/admin/publish', withAdminAuthorization(adminToken, {
+    method: 'POST',
+    body: JSON.stringify({
+      subject,
+      grade,
+      actor: 'admin',
+    }),
+  }));
+}
+
+async function saveAttemptToApi(payload: {
+  subject: Subject;
+  grade: Grade;
+  studentProfile: StudentProfile;
+  responses: Record<string, ResponseValue>;
+  scoreSummary: Record<string, unknown>;
+}) {
+  return requestApi<AttemptSubmission>('/attempts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+async function fetchAnalyticsOverviewFromApi(subject: Subject, grade: Grade, adminToken: string) {
+  const params = new URLSearchParams({ subject, grade });
+  return requestApi<AnalyticsOverview>(
+    `/analytics/overview?${params.toString()}`,
+    withAdminAuthorization(adminToken)
+  );
+}
+
+async function fetchPublishedUnitsFromStaticJson(subject: Subject | null, grade: Grade | null): Promise<Unit[] | null> {
   if (!subject || !grade) return null;
   try {
     const base = import.meta.env.BASE_URL || '/';
-    const formattedGrade = grade.toLowerCase().replace(/\s+/g, '');
-    const filename = `${subject}-${formattedGrade}.json`;
+    const filename = formatPublishedFilename(subject, grade);
     const res = await fetch(`${base}${filename}`, { cache: 'no-store' });
 
     if (!res.ok) {
@@ -473,8 +1101,10 @@ export default function App() {
   const [userRole, setUserRole] = useState<UserRole>(loadSavedRole());
   const [studentProfile, setStudentProfile] = useState<StudentProfile>(loadSavedStudentProfile());
   const [studentForm, setStudentForm] = useState<StudentProfile>(loadSavedStudentProfile());
-  const [adminPin, setAdminPin] = useState('');
-  const [adminPinError, setAdminPinError] = useState('');
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [adminAuthError, setAdminAuthError] = useState('');
+  const [adminSession, setAdminSession] = useState<AdminSession | null>(loadSavedAdminSession());
 
   const [subject, setSubject] = useState<Subject | null>(() => (localStorage.getItem(SUBJECT_STORAGE_KEY) as Subject) || null);
   const [grade, setGrade] = useState<Grade | null>(() => (localStorage.getItem(GRADE_STORAGE_KEY) as Grade) || null);
@@ -498,6 +1128,8 @@ export default function App() {
   const [builderSavedAt, setBuilderSavedAt] = useState<string>('');
   const [saveStatus, setSaveStatus] = useState<'Saved' | 'Saving...'>('Saved');
   const [previewUnitIndex, setPreviewUnitIndex] = useState<number | null>(null);
+  const [backendOverview, setBackendOverview] = useState<AnalyticsOverview | null>(null);
+  const [attemptSubmittedAt, setAttemptSubmittedAt] = useState<string | null>(null);
 
   useEffect(() => {
     const prog = loadSavedProgress(subject, grade);
@@ -508,6 +1140,7 @@ export default function App() {
     setResponses(prog?.responses ?? {});
     setFlaggedQuestions(prog?.flaggedQuestions ?? []);
     setTimeRemaining(prog?.timeRemaining ?? DEFAULT_TIME_SECONDS);
+    setAttemptSubmittedAt(null);
     
     if (subject && grade) {
       localStorage.setItem(SUBJECT_STORAGE_KEY, subject);
@@ -525,10 +1158,17 @@ export default function App() {
       }
       try {
         if (userRole === 'student') {
-          const publishedUnits = await fetchPublishedUnits(subject, grade);
+          const apiPublished = await fetchPublishedUnitsFromApi(subject, grade);
+          if (apiPublished) {
+            setUnits(apiPublished.units);
+            setDataSourceLabel(apiPublished.label);
+            return;
+          }
+
+          const publishedUnits = await fetchPublishedUnitsFromStaticJson(subject, grade);
           if (publishedUnits) {
             setUnits(publishedUnits);
-            setDataSourceLabel(`Published ${subject}-${grade.replace(/\s+/g, '')}.json`);
+            setDataSourceLabel(`Published ${formatPublishedFilename(subject, grade)}`);
             return;
           }
 
@@ -544,10 +1184,24 @@ export default function App() {
           return;
         }
 
-        const publishedUnits = await fetchPublishedUnits(subject, grade);
+        const apiDraft = adminSession ? await fetchDraftUnitsFromApi(subject, grade, adminSession.token) : null;
+        if (apiDraft) {
+          setUnits(apiDraft.units);
+          setDataSourceLabel(apiDraft.label);
+          return;
+        }
+
+        const apiPublished = await fetchPublishedUnitsFromApi(subject, grade);
+        if (apiPublished) {
+          setUnits(apiPublished.units);
+          setDataSourceLabel(apiPublished.label);
+          return;
+        }
+
+        const publishedUnits = await fetchPublishedUnitsFromStaticJson(subject, grade);
         if (publishedUnits) {
           setUnits(publishedUnits);
-          setDataSourceLabel(`Published ${subject}-${grade.replace(/\s+/g, '')}.json`);
+          setDataSourceLabel(`Published ${formatPublishedFilename(subject, grade)}`);
           return;
         }
 
@@ -563,11 +1217,20 @@ export default function App() {
     }
 
     loadUnits();
-  }, [userRole, subject, grade]);
+  }, [userRole, subject, grade, adminSession]);
 
   useEffect(() => {
     localStorage.setItem(USER_ROLE_STORAGE_KEY, userRole);
   }, [userRole]);
+
+  useEffect(() => {
+    if (adminSession) {
+      localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(adminSession));
+      return;
+    }
+
+    localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  }, [adminSession]);
 
   useEffect(() => {
     localStorage.setItem(STUDENT_PROFILE_STORAGE_KEY, JSON.stringify(studentProfile));
@@ -623,12 +1286,45 @@ export default function App() {
   }, [units, userRole, subject, grade]);
 
   useEffect(() => {
+    if (view !== 'analytics' || userRole !== 'admin' || !subject || !grade || !adminSession) {
+      setBackendOverview(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    fetchAnalyticsOverviewFromApi(subject, grade, adminSession.token)
+      .then((result) => {
+        if (!cancelled) {
+          setBackendOverview(result);
+        }
+      })
+      .catch((error) => {
+        console.warn('Failed to fetch analytics overview from API:', error);
+        if (!cancelled) {
+          setBackendOverview(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [view, userRole, subject, grade, adminSession]);
+
+  useEffect(() => {
     if (userRole === 'student') {
       setView('assessment');
     } else if (userRole === 'admin') {
       setView('admin');
     }
   }, [userRole]);
+
+  function clearAdminSession(message?: string) {
+    setAdminSession(null);
+    setUserRole('guest');
+    setAdminPassword('');
+    setAdminAuthError(message ?? 'Admin session expired. Please log in again.');
+  }
 
   const selectedUnit = units[selectedUnitIndex];
   const currentQuestion =
@@ -637,12 +1333,30 @@ export default function App() {
     selectedUnit?.stimulusBlocks[activeStimulusIndex] ?? selectedUnit?.stimulusBlocks[0];
   const previewUnit = previewUnitIndex !== null ? units[previewUnitIndex] : null;
 
-  function saveBuilderNow() {
-    if (!subject || !grade) return;
+  async function saveBuilderNow() {
+    if (!subject || !grade || !adminSession) {
+      clearAdminSession();
+      return;
+    }
     localStorage.setItem(`${BUILDER_STORAGE_KEY_PREFIX}_${subject}_${grade}`, JSON.stringify(units));
-    setSaveStatus('Saved');
-    setBuilderSavedAt(new Date().toLocaleString());
-    setDataSourceLabel('Local admin draft');
+    setSaveStatus('Saving...');
+
+    try {
+      const savedDraft = await saveDraftToApi(subject, grade, units, adminSession.token);
+      setBuilderSavedAt(formatTimestampLabel('Cloud saved', savedDraft.created_at));
+      setDataSourceLabel(`Neon draft v${savedDraft.version_number}`);
+    } catch (error) {
+      console.error('Failed to sync draft to API:', error);
+      if ((error as { status?: number }).status === 401) {
+        clearAdminSession();
+        return;
+      }
+      setBuilderSavedAt(`Local save only • ${new Date().toLocaleString()}`);
+      setDataSourceLabel('Local admin draft');
+      alert('Draft saved locally, but syncing to the API failed.');
+    } finally {
+      setSaveStatus('Saved');
+    }
   }
 
   function resetBuilder() {
@@ -664,18 +1378,21 @@ export default function App() {
     setCurrentQuestionIndex(0);
     setActiveStimulusIndex(0);
     setTimeRemaining(DEFAULT_TIME_SECONDS);
+    setAttemptSubmittedAt(null);
     setAssessmentMode('question');
     if (subject && grade) localStorage.removeItem(`${PROGRESS_STORAGE_KEY_PREFIX}_${subject}_${grade}`);
   }
 
   function handleLogout() {
+    setAdminSession(null);
     setUserRole('guest');
-    setAdminPin('');
-    setAdminPinError('');
+    setAdminPassword('');
+    setAdminAuthError('');
     setSubject(null);
     setGrade(null);
     setSubjectForm('');
     setGradeForm('');
+    setAttemptSubmittedAt(null);
   }
 
   function handleStudentStart() {
@@ -689,21 +1406,36 @@ export default function App() {
     setView('assessment');
   }
 
-  function handleAdminLogin() {
-    if (adminPin === ADMIN_PIN) {
-      if (!subjectForm || !gradeForm) {
-        setAdminPinError('Select Subject and Grade');
-        return;
-      }
+  async function handleAdminLogin() {
+    if (!subjectForm || !gradeForm) {
+      setAdminAuthError('Select Subject and Grade');
+      return;
+    }
+
+    if (!adminUsername.trim()) {
+      setAdminAuthError('Enter the admin username.');
+      return;
+    }
+
+    if (!adminPassword.trim()) {
+      setAdminAuthError('Enter the admin password.');
+      return;
+    }
+
+    try {
+      const session = await createAdminSession(adminUsername.trim(), adminPassword);
+      setAdminSession(session);
       setSubject(subjectForm);
       setGrade(gradeForm);
       setUserRole('admin');
-      setAdminPin('');
-      setAdminPinError('');
+      setAdminPassword('');
+      setAdminAuthError('');
       setView('admin');
-      return;
+    } catch (error) {
+      console.error('Admin login failed:', error);
+      setAdminSession(null);
+      setAdminAuthError((error as { status?: number }).status === 401 ? 'Invalid username or password.' : 'Unable to reach admin login service.');
     }
-    setAdminPinError('Invalid PIN.');
   }
 
   function exportPrintable() {
@@ -713,7 +1445,10 @@ export default function App() {
 
   function exportJSON() {
     const payload = {
+      subject,
+      grade,
       exportedAt: new Date().toISOString(),
+      source: 'manual-export',
       units,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -722,9 +1457,37 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = subject && grade ? `${subject}-${grade.toLowerCase().replace(/\\s+/g, '')}.json` : 'test-data.json';
+    a.download = subject && grade ? formatPublishedFilename(subject, grade) : 'test-data.json';
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function publishBuilderNow() {
+    if (!subject || !grade || !adminSession) {
+      clearAdminSession();
+      return;
+    }
+
+    localStorage.setItem(`${BUILDER_STORAGE_KEY_PREFIX}_${subject}_${grade}`, JSON.stringify(units));
+    setSaveStatus('Saving...');
+
+    try {
+      await saveDraftToApi(subject, grade, units, adminSession.token);
+      const published = await publishDraftToApi(subject, grade, adminSession.token);
+      setBuilderSavedAt(formatTimestampLabel('Published', published.published_at ?? published.created_at));
+      setDataSourceLabel(`Neon published v${published.version_number}`);
+      alert(`Published ${formatPublishedFilename(subject, grade)} to the API.`);
+    } catch (error) {
+      console.error('Failed to publish draft:', error);
+      if ((error as { status?: number }).status === 401) {
+        clearAdminSession();
+        return;
+      }
+      setBuilderSavedAt(`Publish failed • ${new Date().toLocaleString()}`);
+      alert('Publishing failed. Check that the API is running and DATABASE_URL is configured.');
+    } finally {
+      setSaveStatus('Saved');
+    }
   }
 
   function handleImportClick() {
@@ -786,6 +1549,22 @@ export default function App() {
     });
   }
 
+  function duplicateUnit(unitIndex: number) {
+    setUnits((prev) => {
+      if (prev.length >= MAX_UNITS) return prev;
+      const source = prev[unitIndex];
+      if (!source) return prev;
+      const duplicate = duplicateUnitFromSource(source, unitIndex + 1);
+      const next = [...prev];
+      next.splice(unitIndex + 1, 0, duplicate);
+      return next;
+    });
+
+    setSelectedUnitIndex(unitIndex + 1);
+    setCurrentQuestionIndex(0);
+    setActiveStimulusIndex(0);
+  }
+
   function updateUnitField(
     unitIndex: number,
     field: keyof Pick<Unit, 'title' | 'competency'>,
@@ -799,8 +1578,8 @@ export default function App() {
   function updateQuestionField(
     unitIndex: number,
     questionIndex: number,
-    field: keyof Question,
-    value: any
+      field: keyof Question,
+      value: Question[keyof Question]
   ) {
     setUnits((prev) =>
       prev.map((unit, i) => {
@@ -811,12 +1590,7 @@ export default function App() {
 
           if (field === 'type') {
             const nextType = value as QuestionType;
-            return {
-              ...q,
-              type: nextType,
-              options: ['mcq', 'drag-drop', 'calc-mcq'].includes(nextType) ? q.options : ['', '', '', ''],
-              sampleAnswer: nextType === 'text' ? q.sampleAnswer : '',
-            };
+            return normalizeQuestionForType(q, nextType);
           }
 
           return { ...q, [field]: value };
@@ -882,6 +1656,23 @@ export default function App() {
         return { ...u, questions: [...u.questions, newQ] };
       })
     );
+  }
+
+  function duplicateQuestion(unitIndex: number, questionIndex: number) {
+    setUnits((prev) =>
+      prev.map((unit, i) => {
+        if (i !== unitIndex) return unit;
+        const source = unit.questions[questionIndex];
+        if (!source) return unit;
+        const nextQuestions = [...unit.questions];
+        nextQuestions.splice(questionIndex + 1, 0, cloneQuestion(source, questionIndex + 1));
+        return { ...unit, questions: renumberQuestions(nextQuestions) };
+      })
+    );
+
+    if (selectedUnitIndex === unitIndex) {
+      setCurrentQuestionIndex(questionIndex + 1);
+    }
   }
 
   async function uploadQuestionImage(unitIndex: number, questionIndex: number, file: File) {
@@ -1247,9 +2038,43 @@ export default function App() {
       })
     : [];
 
-  function submitAssessment() {
+  const builderSummary = useMemo(() => buildBuilderSummary(units), [units]);
+
+  const selectedUnitSummary = builderSummary.unitSummaries[selectedUnitIndex] ?? null;
+
+  const selectedUnitIssues = builderSummary.issues.filter((issue) => issue.unitIndex === selectedUnitIndex);
+
+  const exportFilename = subject && grade ? formatPublishedFilename(subject, grade) : 'Select a subject and grade first';
+
+  async function submitAssessment() {
     setAssessmentMode('question');
     setView('analytics');
+
+    if (userRole !== 'student' || !subject || !grade || attemptSubmittedAt) {
+      return;
+    }
+
+    try {
+      const attempt = await saveAttemptToApi({
+        subject,
+        grade,
+        studentProfile,
+        responses,
+        scoreSummary: {
+          totalQuestions: analytics.totalQuestions,
+          totalAnswered: analytics.totalAnswered,
+          totalCorrect: analytics.totalCorrect,
+          totalIncorrect: analytics.totalIncorrect,
+          totalFlagged: analytics.totalFlagged,
+          completionRate: analytics.completionRate,
+          accuracyRate: analytics.accuracyRate,
+        },
+      });
+
+      setAttemptSubmittedAt(attempt.submitted_at);
+    } catch (error) {
+      console.error('Failed to submit attempt to API:', error);
+    }
   }
 
   if (isLoadingUnits) {
@@ -1273,12 +2098,14 @@ export default function App() {
             <h1>SDO - San Juan City PISA Type Assessment</h1>
             <p className="page-subtitle">Pinaglabanan St, San Juan City</p>
 
-            <div style={{ marginBottom: '20px', padding: '16px', background: '#f5f5f5', borderRadius: '8px' }}>
-              <div className="field-label" style={{ marginTop: 0 }}>Select Subject</div>
+            <div className="entry-select-panel">
+              <div className="field-label field-label-reset">Select Subject</div>
               <select 
                 value={subjectForm} 
                 onChange={(e) => setSubjectForm(e.target.value as Subject)}
-                style={{ width: '100%', padding: '8px', marginBottom: '16px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '1rem' }}
+                className="entry-select-input entry-select-input-spaced"
+                aria-label="Select subject"
+                title="Select subject"
               >
                 <option value="">-- Choose Subject --</option>
                 <option value="chemistry">Chemistry</option>
@@ -1291,7 +2118,9 @@ export default function App() {
               <select 
                 value={gradeForm} 
                 onChange={(e) => setGradeForm(e.target.value as Grade)}
-                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '1rem' }}
+                className="entry-select-input"
+                aria-label="Select grade"
+                title="Select grade"
               >
                 <option value="">-- Choose Grade --</option>
                 <option value="Grade 6">Grade 6</option>
@@ -1308,18 +2137,24 @@ export default function App() {
 
                 <div className="field-label">Name</div>
                 <input
+                  aria-label="Student name"
+                  title="Student name"
                   value={studentForm.name}
                   onChange={(e) => setStudentForm((prev) => ({ ...prev, name: e.target.value }))}
                 />
 
                 <div className="field-label">School</div>
                 <input
+                  aria-label="Student school"
+                  title="Student school"
                   value={studentForm.school}
                   onChange={(e) => setStudentForm((prev) => ({ ...prev, school: e.target.value }))}
                 />
 
                 <div className="field-label">Grade Level</div>
                 <input
+                  aria-label="Student grade level"
+                  title="Student grade level"
                   value={studentForm.gradeLevel}
                   onChange={(e) =>
                     setStudentForm((prev) => ({ ...prev, gradeLevel: e.target.value }))
@@ -1328,6 +2163,8 @@ export default function App() {
 
                 <div className="field-label">Section</div>
                 <input
+                  aria-label="Student section"
+                  title="Student section"
                   value={studentForm.section}
                   onChange={(e) => setStudentForm((prev) => ({ ...prev, section: e.target.value }))}
                 />
@@ -1341,17 +2178,31 @@ export default function App() {
                 <div className="section-chip">Administrator Access</div>
                 <h2>Admin</h2>
 
-                <div className="field-label">PIN</div>
+                <div className="field-label">Username</div>
                 <input
-                  type="password"
-                  value={adminPin}
+                  type="text"
+                  aria-label="Admin username"
+                  title="Admin username"
+                  value={adminUsername}
                   onChange={(e) => {
-                    setAdminPin(e.target.value);
-                    setAdminPinError('');
+                    setAdminUsername(e.target.value);
+                    setAdminAuthError('');
                   }}
                 />
 
-                {adminPinError && <p className="error-text">{adminPinError}</p>}
+                <div className="field-label">Password</div>
+                <input
+                  type="password"
+                  aria-label="Admin password"
+                  title="Admin password"
+                  value={adminPassword}
+                  onChange={(e) => {
+                    setAdminPassword(e.target.value);
+                    setAdminAuthError('');
+                  }}
+                />
+
+                {adminAuthError && <p className="error-text">{adminAuthError}</p>}
 
                 <button className="primary-btn full-btn" onClick={handleAdminLogin}>
                   Login as Admin
@@ -1374,6 +2225,8 @@ export default function App() {
         type="file"
         accept=".json,application/json"
         className="hidden-file-input"
+        aria-label="Import JSON file"
+        title="Import JSON file"
         onChange={handleImportJSON}
       />
 
@@ -1414,6 +2267,9 @@ export default function App() {
               </button>
               <button onClick={saveBuilderNow} className="primary-btn">
                 Save Builder
+              </button>
+              <button onClick={publishBuilderNow} className="primary-btn">
+                Publish Draft
               </button>
               <button onClick={exportJSON} className="secondary-btn">
                 Export JSON
@@ -1488,10 +2344,59 @@ export default function App() {
 
             <button
               className="secondary-btn add-unit-btn"
+              onClick={() => duplicateUnit(selectedUnitIndex)}
+              disabled={units.length >= MAX_UNITS}
+            >
+              Duplicate Unit
+            </button>
+
+            <button
+              className="secondary-btn add-unit-btn"
               onClick={() => setPreviewUnitIndex(selectedUnitIndex)}
             >
               Preview Unit
             </button>
+
+            <div className="builder-summary-card">
+              <div className="builder-summary-grid">
+                <div className="builder-summary-metric">
+                  <span>Ready Questions</span>
+                  <strong>{builderSummary.readyQuestions}/{builderSummary.totalQuestions}</strong>
+                </div>
+                <div className="builder-summary-metric">
+                  <span>Total Issues</span>
+                  <strong>{builderSummary.issues.length}</strong>
+                </div>
+                <div className="builder-summary-metric">
+                  <span>Selected Unit</span>
+                  <strong>{selectedUnitSummary?.readyQuestions ?? 0}/{selectedUnitSummary?.totalQuestions ?? 0}</strong>
+                </div>
+              </div>
+
+              <p className="builder-summary-note">
+                Publish target: <strong>{exportFilename}</strong>
+              </p>
+
+              <div className="builder-issues-panel">
+                <div className="builder-issues-head">
+                  <span>Selected Unit Checklist</span>
+                  <span>{selectedUnitIssues.length} issue(s)</span>
+                </div>
+
+                {selectedUnitIssues.length > 0 ? (
+                  <div className="builder-issue-list">
+                    {selectedUnitIssues.slice(0, 6).map((issue) => (
+                      <div key={issue.id} className={`builder-issue builder-issue-${issue.severity}`}>
+                        <strong>{issue.questionNumber ? `Q${issue.questionNumber}` : 'Unit'}</strong>
+                        <span>{issue.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="builder-ready-text">This unit is ready for content export.</p>
+                )}
+              </div>
+            </div>
           </div>
 
           <div className="unit-card">
@@ -1504,12 +2409,16 @@ export default function App() {
 
             <div className="field-label">Unit Title</div>
             <input
+              aria-label="Unit title"
+              title="Unit title"
               value={selectedUnit.title}
               onChange={(e) => updateUnitField(selectedUnitIndex, 'title', e.target.value)}
             />
 
             <div className="field-label">Learning Competencies</div>
             <textarea
+              aria-label="Learning competencies"
+              title="Learning competencies"
               value={selectedUnit.competency}
               onChange={(e) => updateUnitField(selectedUnitIndex, 'competency', e.target.value)}
             />
@@ -1549,6 +2458,8 @@ export default function App() {
                   <>
                     <div className="field-label">Tab Label</div>
                     <input
+                      aria-label={`Stimulus tab label for ${block.type} block ${blockIndex + 1}`}
+                      title={`Stimulus tab label for ${block.type} block ${blockIndex + 1}`}
                       value={block.label}
                       onChange={(e) =>
                         updateArticleBlock(selectedUnitIndex, blockIndex, 'label', e.target.value)
@@ -1557,6 +2468,8 @@ export default function App() {
 
                     <div className="field-label">Title</div>
                     <input
+                      aria-label={`Stimulus title for ${block.type} block ${blockIndex + 1}`}
+                      title={`Stimulus title for ${block.type} block ${blockIndex + 1}`}
                       value={block.title}
                       onChange={(e) =>
                         updateArticleBlock(selectedUnitIndex, blockIndex, 'title', e.target.value)
@@ -1565,6 +2478,8 @@ export default function App() {
 
                     <div className="field-label">Content</div>
                     <textarea
+                      aria-label={`Article content for block ${blockIndex + 1}`}
+                      title={`Article content for block ${blockIndex + 1}`}
                       value={block.content}
                       onChange={(e) =>
                         updateArticleBlock(selectedUnitIndex, blockIndex, 'content', e.target.value)
@@ -1575,6 +2490,8 @@ export default function App() {
                     <input
                       type="file"
                       accept="image/*"
+                      aria-label={`Upload article image for block ${blockIndex + 1}`}
+                      title={`Upload article image for block ${blockIndex + 1}`}
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (file) uploadArticleImage(selectedUnitIndex, blockIndex, file);
@@ -1588,6 +2505,8 @@ export default function App() {
                   <>
                     <div className="field-label">Tab Label</div>
                     <input
+                      aria-label={`Table tab label for block ${blockIndex + 1}`}
+                      title={`Table tab label for block ${blockIndex + 1}`}
                       value={block.label}
                       onChange={(e) =>
                         updateTableBlockMeta(selectedUnitIndex, blockIndex, 'label', e.target.value)
@@ -1596,6 +2515,8 @@ export default function App() {
 
                     <div className="field-label">Title</div>
                     <input
+                      aria-label={`Table title for block ${blockIndex + 1}`}
+                      title={`Table title for block ${blockIndex + 1}`}
                       value={block.title}
                       onChange={(e) =>
                         updateTableBlockMeta(selectedUnitIndex, blockIndex, 'title', e.target.value)
@@ -1621,6 +2542,8 @@ export default function App() {
                       {block.headers.map((header, headerIndex) => (
                         <div key={headerIndex} className="table-cell-wrap">
                           <input
+                            aria-label={`Table header ${headerIndex + 1} for block ${blockIndex + 1}`}
+                            title={`Table header ${headerIndex + 1} for block ${blockIndex + 1}`}
                             value={header}
                             onChange={(e) =>
                               updateTableHeader(selectedUnitIndex, blockIndex, headerIndex, e.target.value)
@@ -1647,6 +2570,8 @@ export default function App() {
                         {row.map((cell, colIndex) => (
                           <input
                             key={colIndex}
+                            aria-label={`Table row ${rowIndex + 1} column ${colIndex + 1} for block ${blockIndex + 1}`}
+                            title={`Table row ${rowIndex + 1} column ${colIndex + 1} for block ${blockIndex + 1}`}
                             value={cell}
                             onChange={(e) =>
                               updateTableCell(
@@ -1670,6 +2595,8 @@ export default function App() {
 
                     <div className="field-label">Note</div>
                     <textarea
+                      aria-label={`Table note for block ${blockIndex + 1}`}
+                      title={`Table note for block ${blockIndex + 1}`}
                       value={block.note}
                       onChange={(e) =>
                         updateTableBlockMeta(selectedUnitIndex, blockIndex, 'note', e.target.value)
@@ -1682,6 +2609,8 @@ export default function App() {
                   <>
                     <div className="field-label">Tab Label</div>
                     <input
+                      aria-label={`Chart tab label for block ${blockIndex + 1}`}
+                      title={`Chart tab label for block ${blockIndex + 1}`}
                       value={block.label}
                       onChange={(e) =>
                         updateChartMeta(selectedUnitIndex, blockIndex, 'label', e.target.value)
@@ -1690,6 +2619,8 @@ export default function App() {
 
                     <div className="field-label">Title</div>
                     <input
+                      aria-label={`Chart title for block ${blockIndex + 1}`}
+                      title={`Chart title for block ${blockIndex + 1}`}
                       value={block.title}
                       onChange={(e) =>
                         updateChartMeta(selectedUnitIndex, blockIndex, 'title', e.target.value)
@@ -1703,6 +2634,8 @@ export default function App() {
                     {block.bars.map((bar, barIndex) => (
                       <div key={bar.id} className="options-grid options-grid-2 chart-bar-editor">
                         <input
+                          aria-label={`Chart bar label ${barIndex + 1} for block ${blockIndex + 1}`}
+                          title={`Chart bar label ${barIndex + 1} for block ${blockIndex + 1}`}
                           value={bar.label}
                           onChange={(e) =>
                             updateChartBar(selectedUnitIndex, blockIndex, barIndex, 'label', e.target.value)
@@ -1710,6 +2643,8 @@ export default function App() {
                         />
                         <input
                           type="number"
+                          aria-label={`Chart bar value ${barIndex + 1} for block ${blockIndex + 1}`}
+                          title={`Chart bar value ${barIndex + 1} for block ${blockIndex + 1}`}
                           value={bar.value}
                           onChange={(e) =>
                             updateChartBar(
@@ -1732,6 +2667,8 @@ export default function App() {
 
                     <div className="field-label">Note</div>
                     <textarea
+                      aria-label={`Chart note for block ${blockIndex + 1}`}
+                      title={`Chart note for block ${blockIndex + 1}`}
                       value={block.note}
                       onChange={(e) =>
                         updateChartMeta(selectedUnitIndex, blockIndex, 'note', e.target.value)
@@ -1744,6 +2681,8 @@ export default function App() {
                   <>
                     <div className="field-label">Tab Label</div>
                     <input
+                      aria-label={`Visual tab label for block ${blockIndex + 1}`}
+                      title={`Visual tab label for block ${blockIndex + 1}`}
                       value={block.label}
                       onChange={(e) =>
                         updateVisualBlock(selectedUnitIndex, blockIndex, 'label', e.target.value)
@@ -1752,6 +2691,8 @@ export default function App() {
 
                     <div className="field-label">Title</div>
                     <input
+                      aria-label={`Visual title for block ${blockIndex + 1}`}
+                      title={`Visual title for block ${blockIndex + 1}`}
                       value={block.title}
                       onChange={(e) =>
                         updateVisualBlock(selectedUnitIndex, blockIndex, 'title', e.target.value)
@@ -1762,6 +2703,8 @@ export default function App() {
                     <input
                       type="file"
                       accept="image/*"
+                      aria-label={`Upload visual image for block ${blockIndex + 1}`}
+                      title={`Upload visual image for block ${blockIndex + 1}`}
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (file) uploadVisualImage(selectedUnitIndex, blockIndex, file);
@@ -1771,6 +2714,8 @@ export default function App() {
 
                     <div className="field-label">Note</div>
                     <textarea
+                      aria-label={`Visual note for block ${blockIndex + 1}`}
+                      title={`Visual note for block ${blockIndex + 1}`}
                       value={block.note}
                       onChange={(e) =>
                         updateVisualBlock(selectedUnitIndex, blockIndex, 'note', e.target.value)
@@ -1789,6 +2734,12 @@ export default function App() {
                   <h3>Question {q.number}</h3>
                   <div className="admin-question-actions">
                     <button
+                      className="mini-btn"
+                      onClick={() => duplicateQuestion(selectedUnitIndex, qIndex)}
+                    >
+                      Duplicate Question
+                    </button>
+                    <button
                       className="danger-mini-btn"
                       onClick={() => deleteQuestion(selectedUnitIndex, qIndex)}
                     >
@@ -1799,6 +2750,8 @@ export default function App() {
 
                 <div className="field-label">Question Type</div>
                 <select
+                  aria-label={`Question ${q.number} type`}
+                  title={`Question ${q.number} type`}
                   value={q.type}
                   onChange={(e) =>
                     updateQuestionField(selectedUnitIndex, qIndex, 'type', e.target.value as QuestionType)
@@ -1818,12 +2771,14 @@ export default function App() {
                 <div className="field-label">
                   Prompt
                   {(q.type === 'gap-fill' || q.type === 'drag-drop' || q.type === 'table' || q.type === 'table-mcq') && (
-                    <span style={{ fontWeight: 'normal', fontSize: '13px', marginLeft: '8px', color: '#666' }}>
+                    <span className="question-help-text">
                       {['table', 'table-mcq'].includes(q.type) ? '(Use the Reference Table below for the grid)' : '(Wrap words in [brackets] to create blanks. e.g. "The capital is [Paris]")'}
                     </span>
                   )}
                 </div>
                 <textarea
+                  aria-label={`Prompt for question ${q.number}`}
+                  title={`Prompt for question ${q.number}`}
                   value={q.prompt}
                   onChange={(e) =>
                     updateQuestionField(selectedUnitIndex, qIndex, 'prompt', e.target.value)
@@ -1834,14 +2789,16 @@ export default function App() {
                 <input
                   type="file"
                   accept="image/*"
+                  aria-label={`Upload image for question ${q.number}`}
+                  title={`Upload image for question ${q.number}`}
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) uploadQuestionImage(selectedUnitIndex, qIndex, file);
                   }}
                 />
                 {q.image && (
-                  <div style={{ marginTop: '10px' }}>
-                    <img src={q.image} alt="" className="preview-img" style={{ display: 'block', marginBottom: '8px' }} />
+                  <div className="question-image-actions">
+                    <img src={q.image} alt="" className="preview-img preview-img-tight" />
                     <button
                       className="danger-mini-btn small-btn"
                       onClick={() => updateQuestionField(selectedUnitIndex, qIndex, 'image', undefined)}
@@ -1851,13 +2808,13 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="field-label" style={{ marginTop: '16px' }}>Reference Table</div>
+                <div className="field-label field-label-top-gap">Reference Table</div>
                 {q.tableData ? (
-                  <div className="admin-table-builder" style={{ marginBottom: '16px', background: '#f8fbff', padding: '12px', border: '1px solid var(--line)', borderRadius: '8px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
+                  <div className="admin-table-builder">
+                    <div className="admin-table-toolbar">
                       <button className="danger-mini-btn small-btn" onClick={() => updateQuestionField(selectedUnitIndex, qIndex, 'tableData', undefined)}>Remove Table</button>
                     </div>
-                    <div style={{ overflowX: 'auto', paddingBottom: '8px' }}>
+                    <div className="admin-table-scroll">
                       <table className="builder-table">
                         <tbody>
                           {q.tableData.map((row, rIndex) => (
@@ -1865,27 +2822,31 @@ export default function App() {
                               {row.map((cell, cIndex) => {
                                 if (q.type === 'table-mcq' && rIndex > 0 && cIndex > 0) {
                                   return (
-                                    <td key={cIndex} style={{ padding: '4px', textAlign: 'center' }}>
+                                    <td key={cIndex} className="admin-table-cell admin-table-cell-center">
                                       <input
                                         type="radio"
                                         name={`admin-matrix-${qIndex}-${rIndex}`}
+                                        aria-label={`Correct answer for matrix question ${q.number}, row ${rIndex}, column ${cIndex}`}
+                                        title={`Correct answer for matrix question ${q.number}, row ${rIndex}, column ${cIndex}`}
                                         checked={q.matrixAnswers?.[rIndex - 1] === cIndex - 1}
                                         onChange={() => {
                                           const newAnswers = [...(q.matrixAnswers || new Array(q.tableData!.length - 1).fill(undefined))];
                                           newAnswers[rIndex - 1] = cIndex - 1;
                                           updateQuestionField(selectedUnitIndex, qIndex, 'matrixAnswers', newAnswers);
                                         }}
-                                        style={{ cursor: 'pointer' }}
+                                        className="admin-table-radio"
                                       />
                                     </td>
                                   );
                                 }
                                 return (
-                                  <td key={cIndex} style={{ padding: '4px' }}>
+                                  <td key={cIndex} className="admin-table-cell">
                                     <input
+                                      aria-label={`Reference table cell row ${rIndex + 1} column ${cIndex + 1} for question ${q.number}`}
+                                      title={`Reference table cell row ${rIndex + 1} column ${cIndex + 1} for question ${q.number}`}
                                       value={cell}
                                       placeholder={q.type === 'table-mcq' && rIndex === 0 && cIndex === 0 ? "Top-Left Label (Optional)" : "Cell text..."}
-                                      style={{ margin: 0, padding: '6px 8px', width: '120px' }}
+                                      className="admin-table-input"
                                       onChange={(e) => {
                                         const newTable = [...q.tableData!];
                                         newTable[rIndex] = [...newTable[rIndex]];
@@ -1896,7 +2857,7 @@ export default function App() {
                                   </td>
                                 );
                               })}
-                              <td style={{ verticalAlign: 'middle', border: 'none', background: 'transparent' }}>
+                              <td className="admin-table-action-cell">
                                 <button className="danger-mini-btn small-btn" title="Remove Row" onClick={() => {
                                   const newTable = q.tableData!.filter((_, idx) => idx !== rIndex);
                                   updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable.length ? newTable : undefined);
@@ -1906,19 +2867,19 @@ export default function App() {
                           ))}
                           <tr>
                             {q.tableData[0]?.map((_, cIndex) => (
-                               <td key={`col-rem-${cIndex}`} style={{ textAlign: 'center', border: 'none', background: 'transparent' }}>
+                               <td key={`col-rem-${cIndex}`} className="admin-table-action-cell admin-table-cell-center">
                                  <button className="danger-mini-btn small-btn" title="Remove Column" onClick={() => {
                                    const newTable = q.tableData!.map(r => r.filter((_, idx) => idx !== cIndex));
                                    updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable[0].length ? newTable : undefined);
                                  }}>- Col</button>
                                </td>
                             ))}
-                            <td style={{ border: 'none', background: 'transparent' }}></td>
+                            <td className="admin-table-action-cell"></td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                    <div className="admin-table-button-row">
                       <button className="secondary-btn small-btn" onClick={() => {
                         const newTable = [...q.tableData!, new Array(q.tableData![0].length).fill('')];
                         updateQuestionField(selectedUnitIndex, qIndex, 'tableData', newTable);
@@ -1930,26 +2891,26 @@ export default function App() {
                     </div>
 
                     {q.type === 'table' && (
-                      <div style={{ marginTop: '16px', background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                        <div className="field-label" style={{ marginTop: 0, color: 'var(--primary)' }}>Correct Answers Extracted</div>
-                        <div style={{ fontSize: '13px', color: '#666', marginBottom: '8px' }}>
+                      <div className="answer-extract-card">
+                        <div className="field-label answer-extract-title">Correct Answers Extracted</div>
+                        <div className="answer-extract-help">
                           Add [brackets] to the Table cells above to define the correct answers for the students to fill in.
                         </div>
-                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                        <div className="answer-chip-list">
                           {(q.tableData.map(row => row.join(' ')).join(' ').match(/\[(.*?)\]/g) || []).map((ans, i) => (
-                            <span key={i} style={{ background: '#fff', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '4px', fontSize: '13px', fontWeight: 600 }}>
-                              Blank {i + 1}: <span style={{ color: 'var(--primary)' }}>{ans.slice(1, -1)}</span>
+                            <span key={i} className="answer-chip">
+                              Blank {i + 1}: <span className="answer-chip-value">{ans.slice(1, -1)}</span>
                             </span>
                           ))}
                           {(q.tableData.map(row => row.join(' ')).join(' ').match(/\[(.*?)\]/g) || []).length === 0 && (
-                            <span style={{ color: '#94a3b8', fontSize: '13px', fontStyle: 'italic' }}>No blanks defined yet...</span>
+                            <span className="empty-hint">No blanks defined yet...</span>
                           )}
                         </div>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <button className="secondary-btn small-btn" style={{ marginBottom: '16px' }} onClick={() => {
+                  <button className="secondary-btn small-btn add-table-btn" onClick={() => {
                     updateQuestionField(selectedUnitIndex, qIndex, 'tableData', [['Header 1', 'Header 2'], ['Value 1', 'Value 2']]);
                   }}>
                     + Add Reference Table
@@ -1963,6 +2924,8 @@ export default function App() {
                         <div key={`${q.id}-option-${i}`}>
                           <div className="field-label">Option {String.fromCharCode(65 + i)}</div>
                           <input
+                            aria-label={`Option ${String.fromCharCode(65 + i)} for question ${q.number}`}
+                            title={`Option ${String.fromCharCode(65 + i)} for question ${q.number}`}
                             value={opt}
                             onChange={(e) =>
                               updateQuestionOption(selectedUnitIndex, qIndex, i, e.target.value)
@@ -1974,6 +2937,8 @@ export default function App() {
 
                     <div className="field-label">Correct Answer</div>
                     <select
+                      aria-label={`Correct answer for question ${q.number}`}
+                      title={`Correct answer for question ${q.number}`}
                       value={q.correctAnswer}
                       onChange={(e) =>
                         updateQuestionField(
@@ -1996,6 +2961,8 @@ export default function App() {
                   <>
                     <div className="field-label">Correct Answer</div>
                     <select
+                      aria-label={`True false answer for question ${q.number}`}
+                      title={`True false answer for question ${q.number}`}
                       value={q.correctAnswer}
                       onChange={(e) =>
                         updateQuestionField(
@@ -2018,6 +2985,8 @@ export default function App() {
                       <div className="field-label">Correct Value</div>
                       <input
                         type="number"
+                        aria-label={`Correct numerical value for question ${q.number}`}
+                        title={`Correct numerical value for question ${q.number}`}
                         value={q.numericalAnswer || 0}
                         onChange={(e) =>
                           updateQuestionField(selectedUnitIndex, qIndex, 'numericalAnswer', Number(e.target.value))
@@ -2028,6 +2997,8 @@ export default function App() {
                       <div className="field-label">Tolerance (±)</div>
                       <input
                         type="number"
+                        aria-label={`Numerical tolerance for question ${q.number}`}
+                        title={`Numerical tolerance for question ${q.number}`}
                         value={q.numericalTolerance || 0}
                         onChange={(e) =>
                           updateQuestionField(selectedUnitIndex, qIndex, 'numericalTolerance', Number(e.target.value))
@@ -2042,8 +3013,10 @@ export default function App() {
                     <div className="field-label">Distractor Options</div>
                     <div className="options-grid options-grid-2">
                       {q.options.map((opt, i) => (
-                        <div key={`${q.id}-distractor-${i}`} className="table-cell-wrap" style={{ display: 'flex', gap: '4px' }}>
+                        <div key={`${q.id}-distractor-${i}`} className="table-cell-wrap table-cell-wrap-inline">
                           <input
+                            aria-label={`Distractor ${i + 1} for question ${q.number}`}
+                            title={`Distractor ${i + 1} for question ${q.number}`}
                             value={opt}
                             onChange={(e) =>
                               updateQuestionOption(selectedUnitIndex, qIndex, i, e.target.value)
@@ -2063,8 +3036,7 @@ export default function App() {
                       ))}
                     </div>
                     <button
-                      className="mini-btn"
-                      style={{ marginTop: '8px' }}
+                      className="mini-btn add-inline-btn"
                       onClick={() => {
                         const options = [...q.options, ''];
                         updateQuestionField(selectedUnitIndex, qIndex, 'options', options);
@@ -2077,16 +3049,18 @@ export default function App() {
 
                 {q.type === 'calc-mcq' && (
                   <>
-                    <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div className="field-label field-label-inline-row">
                       Variables
-                      <span style={{ fontWeight: 'normal', fontSize: '13px', color: '#666' }}>
+                      <span className="question-help-text question-help-text-inline">
                         (Use [var_name] in Prompt)
                       </span>
                     </div>
                     {(q.calcVariables || []).map((v, i) => (
-                      <div key={i} className="options-grid options-grid-3" style={{ marginBottom: '8px' }}>
+                      <div key={i} className="options-grid options-grid-3 calc-variable-row">
                         <input
                           placeholder="Name (e.g. x)"
+                          aria-label={`Variable name ${i + 1} for question ${q.number}`}
+                          title={`Variable name ${i + 1} for question ${q.number}`}
                           value={v.name}
                           onChange={(e) => {
                             const vars = [...(q.calcVariables || [])];
@@ -2097,6 +3071,8 @@ export default function App() {
                         <input
                           type="number"
                           placeholder="Min"
+                          aria-label={`Minimum value for variable ${i + 1} in question ${q.number}`}
+                          title={`Minimum value for variable ${i + 1} in question ${q.number}`}
                           value={v.min}
                           onChange={(e) => {
                             const vars = [...(q.calcVariables || [])];
@@ -2104,10 +3080,12 @@ export default function App() {
                             updateQuestionField(selectedUnitIndex, qIndex, 'calcVariables', vars);
                           }}
                         />
-                        <div style={{ display: 'flex', gap: '4px' }}>
+                        <div className="inline-action-row">
                           <input
                             type="number"
                             placeholder="Max"
+                            aria-label={`Maximum value for variable ${i + 1} in question ${q.number}`}
+                            title={`Maximum value for variable ${i + 1} in question ${q.number}`}
                             value={v.max}
                             onChange={(e) => {
                               const vars = [...(q.calcVariables || [])];
@@ -2137,11 +3115,13 @@ export default function App() {
                       Add Variable
                     </button>
 
-                    <div className="field-label" style={{ marginTop: '16px' }}>Option Formulas & Correct Answer</div>
+                    <div className="field-label field-label-top-gap">Option Formulas & Correct Answer</div>
                     <div className="options-grid options-grid-2">
                       {q.options.map((opt, i) => (
-                        <div key={`${q.id}-calc-opt-${i}`} className="table-cell-wrap" style={{ display: 'flex', gap: '4px' }}>
+                        <div key={`${q.id}-calc-opt-${i}`} className="table-cell-wrap table-cell-wrap-inline">
                           <input
+                            aria-label={`Formula for option ${String.fromCharCode(65 + i)} in question ${q.number}`}
+                            title={`Formula for option ${String.fromCharCode(65 + i)} in question ${q.number}`}
                             value={opt}
                             onChange={(e) =>
                               updateQuestionOption(selectedUnitIndex, qIndex, i, e.target.value)
@@ -2152,8 +3132,10 @@ export default function App() {
                       ))}
                     </div>
 
-                    <div className="field-label" style={{ marginTop: '16px' }}>Correct Answer</div>
+                    <div className="field-label field-label-top-gap">Correct Answer</div>
                     <select
+                      aria-label={`Correct calculated option for question ${q.number}`}
+                      title={`Correct calculated option for question ${q.number}`}
                       value={q.correctAnswer}
                       onChange={(e) =>
                         updateQuestionField(
@@ -2172,19 +3154,19 @@ export default function App() {
                 )}
 
                 {['gap-fill', 'drag-drop'].includes(q.type) && (
-                  <div style={{ marginTop: '16px', background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                    <div className="field-label" style={{ marginTop: 0, color: 'var(--primary)' }}>Correct Answers Extracted</div>
-                    <div style={{ fontSize: '13px', color: '#666', marginBottom: '8px' }}>
+                  <div className="answer-extract-card">
+                    <div className="field-label answer-extract-title">Correct Answers Extracted</div>
+                    <div className="answer-extract-help">
                       Add [brackets] to the Prompt above to define the correct answers.
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <div className="answer-chip-list">
                       {(q.prompt.match(/\[(.*?)\]/g) || []).map((ans, i) => (
-                        <span key={i} style={{ background: '#fff', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '4px', fontSize: '13px', fontWeight: 600 }}>
-                          Blank {i + 1}: <span style={{ color: 'var(--primary)' }}>{ans.slice(1, -1)}</span>
+                        <span key={i} className="answer-chip">
+                          Blank {i + 1}: <span className="answer-chip-value">{ans.slice(1, -1)}</span>
                         </span>
                       ))}
                       {(q.prompt.match(/\[(.*?)\]/g) || []).length === 0 && (
-                        <span style={{ color: '#94a3b8', fontSize: '13px', fontStyle: 'italic' }}>No blanks defined yet...</span>
+                        <span className="empty-hint">No blanks defined yet...</span>
                       )}
                     </div>
                   </div>
@@ -2194,6 +3176,8 @@ export default function App() {
                   <>
                     <div className="field-label">Correct Answer / Sample Answer</div>
                     <textarea
+                      aria-label={`Sample answer for question ${q.number}`}
+                      title={`Sample answer for question ${q.number}`}
                       value={q.sampleAnswer}
                       placeholder="Admin will use this string as the golden answer to grade against..."
                       onChange={(e) =>
@@ -2206,8 +3190,7 @@ export default function App() {
             ))}
             
             <button
-              className="primary-btn"
-              style={{ marginTop: '20px' }}
+              className="primary-btn add-question-btn"
               onClick={() => addQuestion(selectedUnitIndex)}
             >
               + Add Question
@@ -2351,7 +3334,7 @@ export default function App() {
                     )}
 
                     {(currentQuestion.type === 'gap-fill' || currentQuestion.type === 'drag-drop') && (
-                      <h3 className="gap-fill-prompt" style={{ lineHeight: '2' }}>
+                      <h3 className="gap-fill-prompt gap-fill-prompt-spaced">
                         {currentQuestion.prompt.split(/(\[.*?\])/g).map((part, i) => {
                           if (part.startsWith('[') && part.endsWith(']')) {
                             const partsBefore = currentQuestion.prompt.split(/(\[.*?\])/g).slice(0, i);
@@ -2365,8 +3348,9 @@ export default function App() {
                                 <input
                                   key={i}
                                   type="text"
-                                  className="text-response-area inline-gap-fill"
-                                  style={{ display: 'inline-block', width: '120px', padding: '4px', margin: '0 8px', minHeight: 'auto' }}
+                                  className="text-response-area inline-gap-fill inline-gap-input"
+                                  aria-label={`Blank ${blankIndex + 1} for question ${currentQuestion.number}`}
+                                  title={`Blank ${blankIndex + 1} for question ${currentQuestion.number}`}
                                   value={curResponses[blankIndex] || ''}
                                   onChange={(e) => {
                                     const next = [...curResponses];
@@ -2379,13 +3363,7 @@ export default function App() {
                               return (
                                 <span
                                   key={i}
-                                  className="drop-zone"
-                                  style={{
-                                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                                    minWidth: '100px', padding: '4px 8px', margin: '0 8px',
-                                    border: '2px dashed #0056b3', minHeight: '32px', backgroundColor: '#f0f8ff',
-                                    verticalAlign: 'middle', cursor: 'pointer', borderRadius: '4px'
-                                  }}
+                                  className="drop-zone drop-zone-inline"
                                   onDragOver={(e) => e.preventDefault()}
                                   onDrop={(e) => {
                                     e.preventDefault();
@@ -2404,7 +3382,7 @@ export default function App() {
                                     }
                                   }}
                                 >
-                                  {curResponses[blankIndex] || <span style={{ opacity: 0.5, fontSize: '14px' }}>Drop here</span>}
+                                  {curResponses[blankIndex] || <span className="drop-zone-placeholder">Drop here</span>}
                                 </span>
                               );
                             }
@@ -2415,9 +3393,9 @@ export default function App() {
                     )}
 
                     {currentQuestion.type === 'drag-drop' && (
-                      <div className="drag-options-container" style={{ marginTop: '20px', padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #ddd' }}>
-                        <div style={{ marginBottom: '8px', fontSize: '14px', fontWeight: 'bold' }}>Draggable Options:</div>
-                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <div className="drag-options-container drag-options-panel">
+                        <div className="drag-options-title">Draggable Options:</div>
+                        <div className="drag-options-list">
                           {Array.from(new Set([
                             ...(currentQuestion.prompt.match(/\[(.*?)\]/g) || []).map((b) => b.slice(1, -1)),
                             ...currentQuestion.options
@@ -2428,10 +3406,7 @@ export default function App() {
                                 key={i}
                                 draggable
                                 onDragStart={(e) => e.dataTransfer.setData('text/plain', opt)}
-                                style={{
-                                  padding: '6px 12px', backgroundColor: '#fff', border: '1px solid #ccc',
-                                  borderRadius: '4px', cursor: 'grab', boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
-                                }}
+                                className="drag-option-chip"
                               >
                                 {opt}
                               </div>
@@ -2445,8 +3420,8 @@ export default function App() {
                     )}
 
                     {currentQuestion.tableData && currentQuestion.tableData.length > 0 && (
-                      <div className="assessment-table-wrap" style={{ overflowX: 'auto', marginBottom: '16px', marginTop: '12px' }}>
-                        <table className="builder-table" style={{ width: '100%', minWidth: '400px' }}>
+                      <div className="assessment-table-wrap assessment-table-scroll">
+                        <table className="builder-table builder-table-full">
                           {currentQuestion.tableData.length > 1 && (
                             <thead>
                               <tr>
@@ -2469,17 +3444,19 @@ export default function App() {
                                       : new Array(currentQuestion.tableData!.length - 1).fill(undefined);
                                     
                                     return (
-                                      <td key={c} style={{ textAlign: 'center' }}>
+                                      <td key={c} className="table-cell-center">
                                         <input 
                                           type="radio"
                                           name={`student-matrix-${currentQuestion.id}-${r}`}
+                                          aria-label={`Matrix answer row ${r + 1} column ${c} for question ${currentQuestion.number}`}
+                                          title={`Matrix answer row ${r + 1} column ${c} for question ${currentQuestion.number}`}
                                           checked={curResponses[r] === c - 1}
                                           onChange={() => {
                                             const next = [...curResponses];
                                             next[r] = c - 1;
                                             answer(currentQuestion.id, next);
                                           }}
-                                          style={{ width: '20px', height: '20px', cursor: 'pointer', margin: 0 }}
+                                          className="matrix-radio-input"
                                         />
                                       </td>
                                     );
@@ -2513,8 +3490,9 @@ export default function App() {
                                               <input
                                                 key={i}
                                                 type="text"
-                                                className="text-response-area inline-gap-fill"
-                                                style={{ display: 'inline-block', width: '90px', padding: '4px', margin: '4px', minHeight: 'auto', border: '1px solid #cad5e2' }}
+                                                className="text-response-area inline-gap-fill inline-table-input"
+                                                aria-label={`Table blank ${overallBlankIndex + 1} for question ${currentQuestion.number}`}
+                                                title={`Table blank ${overallBlankIndex + 1} for question ${currentQuestion.number}`}
                                                 value={curResponses[overallBlankIndex] || ''}
                                                 onChange={(e) => {
                                                   const next = [...curResponses];
@@ -2610,8 +3588,9 @@ export default function App() {
                         <label className="field-label">Your Numerical Answer</label>
                         <input
                           type="number"
-                          className="text-response-area"
-                          style={{ maxWidth: '300px' }}
+                          className="text-response-area numerical-response-input"
+                          aria-label={`Numerical response for question ${currentQuestion.number}`}
+                          title={`Numerical response for question ${currentQuestion.number}`}
                           value={
                             typeof responses[currentQuestion.id] === 'string'
                               ? (responses[currentQuestion.id] as string)
@@ -2628,6 +3607,8 @@ export default function App() {
                         <label className="field-label">Your Answer</label>
                         <textarea
                           className="text-response-area"
+                          aria-label={`Text response for question ${currentQuestion.number}`}
+                          title={`Text response for question ${currentQuestion.number}`}
                           value={
                             typeof responses[currentQuestion.id] === 'string'
                               ? (responses[currentQuestion.id] as string)
@@ -2870,6 +3851,26 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {isAdmin && backendOverview && (
+            <div className="entry-card analytics-card">
+              <h2>Database Activity</h2>
+              <div className="result-grid">
+                <div className="result-box">
+                  <span>Total Attempts</span>
+                  <strong>{backendOverview.totalAttempts}</strong>
+                </div>
+                <div className="result-box accent-result">
+                  <span>Latest Submission</span>
+                  <strong>
+                    {backendOverview.latestAttemptAt
+                      ? new Date(backendOverview.latestAttemptAt).toLocaleString()
+                      : 'No submissions yet'}
+                  </strong>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="entry-card analytics-card">
             <h2>Per Unit Analytics</h2>
