@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
+import { ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
 import { createHmac, scryptSync, timingSafeEqual } from 'node:crypto'
 
 type SessionPayload = {
@@ -14,7 +14,6 @@ type AdminUserRecord = {
   displayName?: string
 }
 
-@Injectable()
 export class AdminAuthService {
   private readonly sessionTtlMs = 1000 * 60 * 60 * 12
 

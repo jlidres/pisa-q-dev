@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common'
+import { ServiceUnavailableException } from '@nestjs/common'
 import { neon } from '@neondatabase/serverless'
 import { z } from 'zod'
 
@@ -42,7 +42,6 @@ const attemptSchema = z.object({
   scoreSummary: z.record(z.string(), z.unknown()).optional(),
 })
 
-@Injectable()
 export class DatabaseService {
   private sqlClient: SqlClient | null = null
 
