@@ -621,27 +621,11 @@ export default async function handler(req: Request, res: Response) {
     req.url = req.url.replace(/^\/api/, '') || '/'
     return app(req, res)
   } catch (error) {
-    const payload = serializeError(error)
-    console.error('Vercel API startup failure:', payload)
-    res.status(500).json(payload)
-  }
-}
-
-function serializeError(error: unknown) {
-  if (error instanceof Error) {
-    return {
+    console.error('Vercel API startup failure:', error)
+    res.status(500).json({
       statusCode: 500,
-      error: error.name,
-      message: error.message,
-      stack: error.stack,
-      node: process.version,
-    }
-  }
-
-  return {
-    statusCode: 500,
-    error: 'UnknownError',
-    message: String(error),
-    node: process.version,
+      error: 'InternalServerError',
+      message: 'Internal server error',
+    })
   }
 }
