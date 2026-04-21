@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "admin:hash": "tsx --tsconfig tsconfig.server.json server/hash-admin-password.ts",
     "dev": "vite",
