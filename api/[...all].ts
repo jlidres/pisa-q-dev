@@ -19,7 +19,32 @@ async function getHandler() {
 }
 
 export default async function handler(req: Request, res: Response) {
-  const app = await getHandler()
-  req.url = req.url.replace(/^\/api/, '') || '/'
-  return app(req, res)
+  try {
+    const app = await getHandler()
+    req.url = req.url.replace(/^\/api/, '') || '/'
+    return app(req, res)
+  } catch (error) {
+    const payload = serializeError(error)
+    console.error('Vercel API startup failure:', payload)
+    res.status(500).json(payload)
+  }
+}
+
+function serializeError(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      statusCode: 500,
+      error: error.name,
+      message: error.message,
+      stack: error.stack,
+      node: process.version,
+    }
+  }
+
+  return {
+    statusCode: 500,
+    error: 'UnknownError',
+    message: String(error),
+    node: process.version,
+  }
 }
