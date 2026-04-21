@@ -3,7 +3,7 @@ import 'reflect-metadata'
 import express from 'express'
 import type { Request, Response } from 'express'
 
-import { createNestServer } from '../server/src/create-nest-server.js'
+import { createNestServer } from '../server/src/create-nest-server'
 
 let cachedHandler: ReturnType<typeof express> | null = null
 

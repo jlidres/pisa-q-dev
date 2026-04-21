@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, Inject, Post, Put, Query } from '@nestjs/common'
 
-import { AdminAuthService } from './admin-auth.service.js'
-import { DatabaseService } from './database.service.js'
+import { AdminAuthService } from './admin-auth.service'
+import { DatabaseService } from './database.service'
 
 @Controller()
 export class AppController {

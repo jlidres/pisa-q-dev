@@ -2,7 +2,7 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common'
 import { neon } from '@neondatabase/serverless'
 import { z } from 'zod'
 
-import type { AssessmentPayload } from './contracts.js'
+import type { AssessmentPayload } from './contracts'
 
 type SqlClient = ReturnType<typeof neon>
 

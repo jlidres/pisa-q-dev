@@ -2,7 +2,7 @@ import 'dotenv/config'
 import 'reflect-metadata'
 import express from 'express'
 
-import { createNestServer } from './src/create-nest-server.js'
+import { createNestServer } from './src/create-nest-server'
 
 async function bootstrap() {
   const port = Number(process.env.API_PORT || 3000)

@@ -3,7 +3,7 @@ import { NestFactory } from '@nestjs/core'
 import { ExpressAdapter } from '@nestjs/platform-express'
 import type { Express } from 'express'
 
-import { AppModule } from './app.module.js'
+import { AppModule } from './app.module'
 
 export async function createNestServer(expressApp: Express) {
   expressApp.use(express.json({ limit: '10mb' }))
