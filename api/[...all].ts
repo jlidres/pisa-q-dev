@@ -3,8 +3,6 @@ import 'reflect-metadata'
 import express from 'express'
 import type { Request, Response } from 'express'
 
-import { createNestServer } from '../server/src/create-nest-server'
-
 let cachedHandler: ReturnType<typeof express> | null = null
 
 async function getHandler() {
@@ -12,6 +10,7 @@ async function getHandler() {
     return cachedHandler
   }
 
+  const { createNestServer } = await import('../server/src/create-nest-server')
   const expressApp = express()
   await createNestServer(expressApp)
   cachedHandler = expressApp
